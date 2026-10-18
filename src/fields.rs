@@ -41,7 +41,7 @@ pub enum StandardField {
 /// Traits describe defaults, not the stored state: any field can carry the
 /// KDBX protection flag, and a single-line field whose value contains a line
 /// feed is still rendered as multi-line by callers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct FieldTraits {
     /// The field usually holds several lines of text.
@@ -198,6 +198,14 @@ mod tests {
         assert_eq!(traits_of("otp"), FieldTraits::CUSTOM);
         assert_eq!(traits_of("password"), FieldTraits::CUSTOM);
         assert_eq!(FieldTraits::CUSTOM, FieldTraits::default());
+    }
+
+    #[test]
+    fn field_traits_serialize() {
+        let json = serde_json::to_string(&StandardField::Notes.traits()).unwrap();
+        assert_eq!(json, r#"{"multiline":true,"protected_by_default":false}"#);
+        let back: FieldTraits = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, StandardField::Notes.traits());
     }
 
     #[test]
