@@ -3,7 +3,7 @@
 //! `kdbx-core` owns the parts every member of the ecosystem (diff-kdbx,
 //! mcp-kdbx, web-kdbx) must agree on, so none of them re-implements them:
 //!
-//! - [`model`]: an owned, serializable, keepass-free `Snapshot`
+//! - [`model`]: an owned, serializable, keepass-free [`Snapshot`](model::Snapshot)
 //!   of a database. Secrets are sealed at capture time, so nothing downstream
 //!   can leak a protected value by mistake.
 //! - [`fields`]: the five KDBX standard fields and their traits.
