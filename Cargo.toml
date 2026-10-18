@@ -1,0 +1,77 @@
+[package]
+name = "kdbx-core"
+version = "0.1.0"
+edition = "2024"
+# keepass 0.15 (the `keepass-0_15` adapter) requires 1.89.
+rust-version = "1.89"
+description = "Shared vault model and rules for the *-kdbx ecosystem: a keepass-free KDBX snapshot, one path grammar, one visibility rule, keyed fingerprints, safe text rendering and TOTP"
+authors = ["Alexander Towell <lex@metafunctor.com>"]
+license = "MIT"
+repository = "https://github.com/queelius/kdbx-core"
+readme = "README.md"
+keywords = ["keepass", "kdbx", "vault", "totp", "password"]
+categories = ["cryptography", "data-structures"]
+
+[features]
+default = ["kdf"]
+# Argon2id derivation of a stable FingerprintKey from the vault's key material.
+# web-kdbx disables it to keep argon2 out of its WASM bundle.
+kdf = ["dep:argon2"]
+# Snapshot capture from a keepass 0.12 Database (reads and writes KDBX 4.0).
+keepass-0_12 = ["dep:keepass_0_12"]
+# Snapshot capture from a keepass 0.15 Database (reads 3.1/4.0/4.1, writes 4.1).
+keepass-0_15 = ["dep:keepass_0_15"]
+
+[dependencies]
+# Model serialization (shape documented as unstable before 1.0).
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+# Record identities. No v4: the library never generates UUIDs.
+uuid = { version = "1", default-features = false, features = ["std", "serde"] }
+# Timestamp formatting and parsing (YYYY-MM-DDTHH:MM:SSZ). No clock, no
+# wasm-bindgen: the library never reads the time.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+# HMAC-SHA256 fingerprints, SHA-256 key-material hashing, TOTP HMAC-SHA256/512.
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+# TOTP HMAC-SHA1 (RFC 6238's default algorithm). Same RustCrypto family and
+# digest version as sha2, so it adds one small crate.
+sha1 = { version = "0.10", default-features = false }
+# Constant-time Fingerprint equality. Already in the graph through digest.
+subtle = { version = "2", default-features = false }
+# Wipes FingerprintKey and TOTP secrets on drop.
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
+# NFC normalization for path-name comparison.
+unicode-normalization = { version = "0.1", default-features = false, features = ["std"] }
+# General_Category lookup (Cc, Cf, Zl, Zp) for escape_inline.
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
+# base32 (otpauth secrets), base64 and hex (KeePass TimeOtp-* secrets, and
+# fingerprint hex). One dependency-free crate instead of three.
+data-encoding = { version = "2", default-features = false, features = ["alloc"] }
+# Percent-decoding of the otpauth:// query string. The url crate would pull
+# IDNA tables into WASM for a URI whose authority is the literal "totp".
+form_urlencoded = { version = "1", default-features = false, features = ["alloc"] }
+
+argon2 = { version = "0.5", optional = true, default-features = false, features = ["zeroize"] }
+
+keepass_0_12 = { package = "keepass", version = "0.12.9", optional = true, default-features = false }
+keepass_0_15 = { package = "keepass", version = "0.15.3", optional = true, default-features = false }
+
+[dev-dependencies]
+proptest = "1"
+serde_json = "1"
+# Tests and the corpus generator build databases in memory and save them, so
+# they need save_kdbx4. As dev-dependencies these never reach library users.
+keepass_0_12 = { package = "keepass", version = "0.12.9", features = ["save_kdbx4"] }
+keepass_0_15 = { package = "keepass", version = "0.15.3", features = ["save_kdbx4"] }
+
+# Argon2 (fingerprint KDF, and keepass's own KDF in tests) is unbearably slow
+# without optimization; tests run it many times.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.rust-argon2]
+opt-level = 3
+
+[package.metadata.docs.rs]
+all-features = true
