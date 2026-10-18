@@ -766,8 +766,7 @@ impl<'k> Sealing<'k> {
     /// and it is not the Title: a Title is an address, never a secret, so it
     /// stays plain even when its protection flag is set (the flag is kept).
     pub fn field(&self, name: &str, protected: bool, plaintext: &str) -> Field {
-        let is_address = StandardField::from_kdbx_name(name) == Some(StandardField::Title);
-        let value = if protected && !is_address && !self.reveals() {
+        let value = if protected && !crate::visibility::is_address(name) && !self.reveals() {
             Value::Sealed(self.key().fingerprint(Domain::Field, plaintext.as_bytes()))
         } else {
             Value::Plain(plaintext.to_owned())
