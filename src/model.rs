@@ -58,6 +58,154 @@ pub struct Snapshot {
     /// The `<DeletedObjects>` tombstones: UUID of a deleted record, and when
     /// it was deleted.
     pub deleted_objects: BTreeMap<Uuid, Option<Timestamp>>,
+    /// The outer KDBX header's security configuration (KDF, ciphers,
+    /// compression), when captured from a file. `None` for a snapshot built
+    /// by hand.
+    pub header: Option<HeaderInfo>,
+}
+
+/// The security configuration in a KDBX file's outer header.
+///
+/// diff-kdbx reports changes here (a KDF downgrade, say), and fingerprint key
+/// derivation reads the KDF so a fingerprint key is never cheaper to attack
+/// than the vault itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct HeaderInfo {
+    /// The key derivation function and its parameters.
+    pub kdf: KdfInfo,
+    /// The cipher encrypting the database payload.
+    pub outer_cipher: OuterCipher,
+    /// The stream cipher protecting protected values inside the payload.
+    pub inner_cipher: InnerCipher,
+    /// Payload compression.
+    pub compression: Compression,
+    /// The keys of the header's public custom data (plugin metadata; values
+    /// are not captured).
+    pub public_custom_data: BTreeSet<String>,
+}
+
+/// A KDBX key derivation function and its parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum KdfInfo {
+    /// AES-KDF (KDBX 3.1 and older 4.x vaults).
+    Aes {
+        /// Transformation rounds.
+        rounds: u64,
+    },
+    /// Argon2d or Argon2id.
+    Argon2(Argon2Info),
+    /// A KDF the capturing keepass version does not name.
+    Unrecognized,
+}
+
+/// The parameters of an Argon2 KDF as stored in a KDBX header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Argon2Info {
+    /// Argon2d or Argon2id.
+    pub variant: Argon2Variant,
+    /// Memory cost in bytes (as KDBX stores it).
+    pub memory_bytes: u64,
+    /// Number of passes.
+    pub iterations: u64,
+    /// Degree of parallelism (lanes).
+    pub parallelism: u32,
+    /// Argon2 version (`0x13` = 19, or `0x10`).
+    pub version: u32,
+}
+
+/// The Argon2 variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Argon2Variant {
+    /// Argon2d (KeePass's original choice).
+    Argon2d,
+    /// Argon2id.
+    Argon2id,
+}
+
+/// The KDBX outer (payload) cipher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OuterCipher {
+    /// AES-256-CBC.
+    Aes256,
+    /// Twofish-CBC.
+    Twofish,
+    /// ChaCha20.
+    ChaCha20,
+    /// A cipher the capturing keepass version does not name.
+    Unrecognized,
+}
+
+/// The KDBX inner (protected-value) stream cipher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InnerCipher {
+    /// No inner encryption.
+    Plain,
+    /// Salsa20 (KDBX 3.1).
+    Salsa20,
+    /// ChaCha20 (KDBX 4).
+    ChaCha20,
+    /// A cipher the capturing keepass version does not name.
+    Unrecognized,
+}
+
+/// KDBX payload compression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Compression {
+    /// Uncompressed.
+    None,
+    /// GZip.
+    GZip,
+    /// A compression the capturing keepass version does not name.
+    Unrecognized,
+}
+
+impl HeaderInfo {
+    /// A header description with no public custom data.
+    pub fn new(
+        kdf: KdfInfo,
+        outer_cipher: OuterCipher,
+        inner_cipher: InnerCipher,
+        compression: Compression,
+    ) -> Self {
+        HeaderInfo {
+            kdf,
+            outer_cipher,
+            inner_cipher,
+            compression,
+            public_custom_data: BTreeSet::new(),
+        }
+    }
+}
+
+impl Argon2Info {
+    /// Argon2 parameters as a KDBX header stores them.
+    pub fn new(
+        variant: Argon2Variant,
+        memory_bytes: u64,
+        iterations: u64,
+        parallelism: u32,
+        version: u32,
+    ) -> Self {
+        Argon2Info {
+            variant,
+            memory_bytes,
+            iterations,
+            parallelism,
+            version,
+        }
+    }
 }
 
 /// A KDBX file format version (3.1, 4.0, 4.1).
@@ -442,6 +590,7 @@ impl Snapshot {
             meta,
             root,
             deleted_objects: BTreeMap::new(),
+            header: None,
         }
     }
 
@@ -1261,6 +1410,20 @@ mod tests {
         snap.root.icon = Some(Icon::Custom(id(7)));
         snap.root.times.creation = Timestamp::from_unix(0);
         snap.deleted_objects.insert(id(77), Timestamp::from_unix(1));
+        let mut header = HeaderInfo::new(
+            KdfInfo::Argon2(Argon2Info::new(
+                Argon2Variant::Argon2id,
+                64 << 20,
+                3,
+                2,
+                0x13,
+            )),
+            OuterCipher::ChaCha20,
+            InnerCipher::ChaCha20,
+            Compression::GZip,
+        );
+        header.public_custom_data.insert("plugin".into());
+        snap.header = Some(header);
         let json = serde_json::to_string(&snap).unwrap();
         assert!(json.contains(r#""value":{"plain":"A"}"#), "{json}");
         assert!(json.contains(r#""value":{"sealed":""#), "{json}");

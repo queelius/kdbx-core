@@ -72,8 +72,9 @@ macro_rules! keepass_adapter {
         use uuid::Uuid;
 
         use $crate::model::{
-            AutoType, AutoTypeAssociation, CustomValue, Entry, FormatVersion, Group, GroupFlags,
-            Icon, MemoryProtection, Meta, Rgb, Sealing, Snapshot, Times, Timestamp,
+            Argon2Info, Argon2Variant, AutoType, AutoTypeAssociation, Compression, CustomValue,
+            Entry, FormatVersion, Group, GroupFlags, HeaderInfo, Icon, InnerCipher, KdfInfo,
+            MemoryProtection, Meta, OuterCipher, Rgb, Sealing, Snapshot, Times, Timestamp,
         };
         use $crate::otp::{OtpField, OtpFields};
 
@@ -86,6 +87,7 @@ macro_rules! keepass_adapter {
                 meta(db, sealing),
                 group(db.root(), sealing),
             );
+            snap.header = Some(header_info(&db.config));
             snap.deleted_objects = db
                 .deleted_objects
                 .iter()
@@ -113,6 +115,71 @@ macro_rules! keepass_adapter {
                 DatabaseVersion::KDB3(minor) => FormatVersion::new(3, minor),
                 DatabaseVersion::KDB4(minor) => FormatVersion::new(4, minor),
             }
+        }
+
+        fn header_info(config: &::$kp::config::DatabaseConfig) -> HeaderInfo {
+            use ::$kp::config::{
+                CompressionConfig, InnerCipherConfig, KdfConfig, OuterCipherConfig,
+            };
+            let argon2 = |variant, memory: u64, iterations: u64, parallelism: u32, version: u32| {
+                KdfInfo::Argon2(Argon2Info::new(
+                    variant,
+                    memory,
+                    iterations,
+                    parallelism,
+                    version,
+                ))
+            };
+            // keepass marks these enums #[non_exhaustive]; a variant it adds
+            // later is reported as Unrecognized until the adapter learns it.
+            let kdf = match &config.kdf_config {
+                KdfConfig::Aes { rounds } => KdfInfo::Aes { rounds: *rounds },
+                KdfConfig::Argon2 {
+                    iterations,
+                    memory,
+                    parallelism,
+                    version,
+                } => argon2(
+                    Argon2Variant::Argon2d,
+                    *memory,
+                    *iterations,
+                    *parallelism,
+                    version.as_u32(),
+                ),
+                KdfConfig::Argon2id {
+                    iterations,
+                    memory,
+                    parallelism,
+                    version,
+                } => argon2(
+                    Argon2Variant::Argon2id,
+                    *memory,
+                    *iterations,
+                    *parallelism,
+                    version.as_u32(),
+                ),
+                _ => KdfInfo::Unrecognized,
+            };
+            let outer = match config.outer_cipher_config {
+                OuterCipherConfig::AES256 => OuterCipher::Aes256,
+                OuterCipherConfig::Twofish => OuterCipher::Twofish,
+                OuterCipherConfig::ChaCha20 => OuterCipher::ChaCha20,
+                _ => OuterCipher::Unrecognized,
+            };
+            let inner = match config.inner_cipher_config {
+                InnerCipherConfig::Plain => InnerCipher::Plain,
+                InnerCipherConfig::Salsa20 => InnerCipher::Salsa20,
+                InnerCipherConfig::ChaCha20 => InnerCipher::ChaCha20,
+                _ => InnerCipher::Unrecognized,
+            };
+            let compression = match config.compression_config {
+                CompressionConfig::None => Compression::None,
+                CompressionConfig::GZip => Compression::GZip,
+                _ => Compression::Unrecognized,
+            };
+            let mut header = HeaderInfo::new(kdf, outer, inner, compression);
+            header.public_custom_data = public_custom_data_keys(config);
+            header
         }
 
         fn meta(db: &::$kp::Database, sealing: &Sealing<'_>) -> Meta {
@@ -365,6 +432,16 @@ pub mod keepass_0_12 {
     ) -> (Option<String>, Option<Timestamp>) {
         (None, None)
     }
+
+    fn public_custom_data_keys(
+        config: &::keepass_0_12::config::DatabaseConfig,
+    ) -> BTreeSet<String> {
+        config
+            .public_custom_data
+            .as_ref()
+            .map(|d| d.data.keys().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 /// Capture from keepass 0.15 (`keepass-0_15` feature).
@@ -415,5 +492,15 @@ pub mod keepass_0_15 {
             icon.name.clone(),
             icon.last_modification_time.as_ref().and_then(timestamp),
         )
+    }
+
+    fn public_custom_data_keys(
+        config: &::keepass_0_15::config::DatabaseConfig,
+    ) -> BTreeSet<String> {
+        config
+            .public_custom_data
+            .as_ref()
+            .map(|d| d.keys().cloned().collect())
+            .unwrap_or_default()
     }
 }

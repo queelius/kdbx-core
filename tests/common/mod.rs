@@ -5,8 +5,9 @@
 use chrono::NaiveDateTime;
 use kdbx_core::fingerprint::FingerprintKey;
 use kdbx_core::model::{
-    AutoType, AutoTypeAssociation, AutoTypeObfuscation, Entry, Field, FormatVersion, Group, Icon,
-    MemoryProtection, Meta, Rgb, Sealing, Snapshot, Times, Timestamp,
+    AutoType, AutoTypeAssociation, AutoTypeObfuscation, Compression, Entry, Field, FormatVersion,
+    Group, HeaderInfo, Icon, InnerCipher, KdfInfo, MemoryProtection, Meta, OuterCipher, Rgb,
+    Sealing, Snapshot, Times, Timestamp,
 };
 use keepass_0_15 as kp;
 use kp::db::{CustomDataItem, CustomDataValue, EntryId, GroupId};
@@ -130,6 +131,9 @@ pub fn rich_db_with(extras: Kdbx41Extras) -> (kp::Database, Uuid) {
     let archive_home = if include { WORK } else { ROOT };
     let mut db = kp::Database::new_with_root_id(GroupId::from_uuid(ROOT));
     db.config.kdf_config = kp::config::KdfConfig::Aes { rounds: 64 };
+    let mut public = kp::config::VariantDictionary::new();
+    public.set("kdbx-core-plugin", 42u32);
+    db.config.public_custom_data = Some(public);
 
     let m = &mut db.meta;
     m.database_name = Some("kdbx-core capture test".into());
@@ -410,6 +414,14 @@ pub fn expected(sealing: &Sealing<'_>, icon: Uuid) -> Snapshot {
 
     let mut snap = Snapshot::new(FormatVersion::KDBX_4_1, meta, root);
     snap.deleted_objects.insert(DELETED, ts(T0));
+    let mut header = HeaderInfo::new(
+        KdfInfo::Aes { rounds: 64 },
+        OuterCipher::Aes256,
+        InnerCipher::ChaCha20,
+        Compression::GZip,
+    );
+    header.public_custom_data.insert("kdbx-core-plugin".into());
+    snap.header = Some(header);
     snap
 }
 

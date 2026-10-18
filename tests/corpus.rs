@@ -291,6 +291,36 @@ macro_rules! adapter_tests {
             }
 
             #[test]
+            fn header_configuration_is_captured() {
+                use kdbx_core::model::{Argon2Variant, InnerCipher, KdfInfo};
+                for f in vaults().filter(|f| f.readers.contains(&$reader)) {
+                    let (sealed, _) = snapshots(&f);
+                    let header = sealed.header.as_ref().expect("captured from a file");
+                    match &f.file[..] {
+                        "keepass-rs_test_db_kdbx4_with_password_argon2.kdbx" => {
+                            let KdfInfo::Argon2(a) = header.kdf else {
+                                panic!("{}: {:?}", f.file, header.kdf)
+                            };
+                            assert_eq!(a.variant, Argon2Variant::Argon2d);
+                            assert_eq!(a.version, 0x13);
+                        }
+                        "keepass-rs_test_db_kdbx3_with_attachments.kdbx" => {
+                            assert!(
+                                matches!(header.kdf, KdfInfo::Aes { .. }),
+                                "{:?}",
+                                header.kdf
+                            );
+                            assert_eq!(header.inner_cipher, InnerCipher::Salsa20);
+                        }
+                        "kdbx-core_corpus_v40.kdbx" | "kdbx-core_corpus_v41.kdbx" => {
+                            assert_eq!(header.kdf, KdfInfo::Aes { rounds: 64 });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            #[test]
             fn diff_kdbx_legacy_vault() {
                 let (sealed, _) = snapshots(&by_name("diff-kdbx_legacy_kdbx40.kdbx"));
                 assert_eq!(sealed.root.name, "");
