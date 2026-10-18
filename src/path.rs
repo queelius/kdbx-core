@@ -56,6 +56,7 @@
 //! assert_eq!(path_of(&snap, Uuid::from_u128(2)).unwrap().format(), "/Web/");
 //! ```
 
+use std::collections::HashMap;
 use std::fmt;
 use std::str::{Chars, FromStr};
 
@@ -184,6 +185,15 @@ impl Segment {
         })
     }
 
+    /// A segment from an already NFC-normalized name; `None` for an empty one.
+    fn from_nfc(name: String, ordinal: Option<usize>) -> Option<Self> {
+        if name.is_empty() {
+            return None;
+        }
+        let ordinal = ordinal.filter(|&n| n > 1);
+        Some(Segment { name, ordinal })
+    }
+
     /// The record name (escapes decoded, ordinal stripped).
     pub fn name(&self) -> &str {
         &self.name
@@ -308,34 +318,114 @@ pub fn path_of(snap: &Snapshot, uuid: Uuid) -> Option<VaultPath> {
         .windows(2)
         .map(|pair| {
             let (parent, group) = (pair[0], pair[1]);
-            segment_for(&parent.groups, group.uuid, &group.name, group_name, |g| {
-                g.uuid
-            })
+            segment_of(&parent.groups, group, group_name, |g| g.uuid)
         })
         .collect::<Option<Vec<_>>>()?;
     let parent = chain.last()?;
     match node {
         NodeRef::Group(g) => {
-            segments.push(segment_for(
-                &parent.groups,
-                g.uuid,
-                &g.name,
-                group_name,
-                |g| g.uuid,
-            )?);
+            segments.push(segment_of(&parent.groups, g, group_name, |g| g.uuid)?);
             Some(VaultPath::group(segments))
         }
         NodeRef::Entry(e) => {
-            let title = entry_name(e);
-            segments.push(segment_for(
-                &parent.entries,
-                e.uuid,
-                title,
-                entry_name,
-                |e| e.uuid,
-            )?);
+            segments.push(segment_of(&parent.entries, e, entry_name, |e| e.uuid)?);
             VaultPath::entry(segments).ok()
         }
+    }
+}
+
+/// Every node's canonical path, computed in one pass over a snapshot.
+///
+/// [`path_of`] is the single-lookup convenience: it is linear in the size of
+/// the snapshot, so calling it for every node is quadratic. A `PathIndex`
+/// visits each node once, normalizes each name once, and assigns ordinals per
+/// sibling list, so it is the way to get many paths (a dump, a diff, a
+/// listing). Its paths are exactly [`path_of`]'s: a node without a path is
+/// absent, and if a malformed snapshot repeats a UUID, the first node in
+/// [`Snapshot::walk`] order wins.
+///
+/// ```
+/// use kdbx_core::model::{Entry, Field, FormatVersion, Group, Meta, Snapshot};
+/// use kdbx_core::path::PathIndex;
+/// use uuid::Uuid;
+///
+/// let root = Group::new(Uuid::from_u128(1), "Root")
+///     .with_entry(Entry::new(Uuid::from_u128(3)).with_field("Title", Field::plain("Twin")))
+///     .with_entry(Entry::new(Uuid::from_u128(2)).with_field("Title", Field::plain("Twin")));
+/// let snap = Snapshot::new(FormatVersion::KDBX_4_1, Meta::default(), root);
+/// let index = PathIndex::new(&snap);
+/// assert_eq!(index.get(Uuid::from_u128(2)).unwrap().format(), "/Twin");
+/// assert_eq!(index.get(Uuid::from_u128(3)).unwrap().format(), "/Twin:2");
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PathIndex {
+    paths: HashMap<Uuid, VaultPath>,
+}
+
+impl PathIndex {
+    /// Index every node of `snap`.
+    pub fn new(snap: &Snapshot) -> Self {
+        let mut paths = HashMap::new();
+        // Pre-order with an explicit stack (no recursion depth limit): a
+        // group's path is recorded when it is popped, then its entries', then
+        // its child groups are pushed in reverse so they pop in order. This
+        // is Snapshot::walk's order, so the first of any duplicate UUIDs wins
+        // exactly as in path_of.
+        let mut stack: Vec<(&Group, Option<VaultPath>)> =
+            vec![(&snap.root, Some(VaultPath::root()))];
+        while let Some((group, path)) = stack.pop() {
+            if let Some(p) = &path {
+                paths.entry(group.uuid).or_insert_with(|| p.clone());
+            }
+            let prefix = path.as_ref().map(VaultPath::segments);
+            let entry_segments = sibling_segments(&group.entries, entry_name, |e| e.uuid);
+            for (entry, segment) in group.entries.iter().zip(entry_segments) {
+                if let (Some(prefix), Some(segment)) = (prefix, segment) {
+                    let mut segments = prefix.to_vec();
+                    segments.push(segment);
+                    if let Ok(p) = VaultPath::entry(segments) {
+                        paths.entry(entry.uuid).or_insert(p);
+                    }
+                }
+            }
+            let group_segments = sibling_segments(&group.groups, group_name, |g| g.uuid);
+            let children: Vec<_> = group
+                .groups
+                .iter()
+                .zip(group_segments)
+                .map(|(child, segment)| {
+                    let child_path = prefix.zip(segment).map(|(prefix, segment)| {
+                        let mut segments = prefix.to_vec();
+                        segments.push(segment);
+                        VaultPath::group(segments)
+                    });
+                    (child, child_path)
+                })
+                .collect();
+            stack.extend(children.into_iter().rev());
+        }
+        PathIndex { paths }
+    }
+
+    /// The path of the node `uuid`, if it has one.
+    pub fn get(&self, uuid: Uuid) -> Option<&VaultPath> {
+        self.paths.get(&uuid)
+    }
+
+    /// Number of nodes with a path.
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    /// Whether no node has a path (never true for an index of a snapshot: the
+    /// root always has `/`).
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    /// Every `(uuid, path)` pair, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = (Uuid, &VaultPath)> + '_ {
+        self.paths.iter().map(|(uuid, path)| (*uuid, path))
     }
 }
 
@@ -579,30 +669,43 @@ fn pick<'s, T>(
     matches.get(seg.ordinal.unwrap_or(1) - 1).copied()
 }
 
-/// The segment naming `target` among `siblings`: its name, plus an ordinal
-/// only when another sibling shares the name. `None` for an empty name.
-fn segment_for<T>(
+/// The segment of every item in `siblings`, in order: its NFC name (computed
+/// once per item), with an ordinal only when another sibling shares the name.
+/// Same-named siblings are numbered in UUID order (ties in document order,
+/// matching the stable sort in `pick`). `None` for an empty name.
+fn sibling_segments<T>(
     siblings: &[T],
-    target: Uuid,
-    name: &str,
+    name_of: impl Fn(&T) -> &str,
+    uuid_of: impl Fn(&T) -> Uuid,
+) -> Vec<Option<Segment>> {
+    let names: Vec<String> = siblings.iter().map(|it| nfc(name_of(it))).collect();
+    let mut buckets: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, name) in names.iter().enumerate() {
+        buckets.entry(name.as_str()).or_default().push(i);
+    }
+    let mut ordinals: Vec<Option<usize>> = vec![None; siblings.len()];
+    for indices in buckets.values_mut().filter(|v| v.len() > 1) {
+        indices.sort_by_key(|&i| (uuid_of(&siblings[i]), i));
+        for (rank, &i) in indices.iter().enumerate() {
+            ordinals[i] = Some(rank + 1);
+        }
+    }
+    names
+        .into_iter()
+        .zip(ordinals)
+        .map(|(name, ordinal)| Segment::from_nfc(name, ordinal))
+        .collect()
+}
+
+/// The segment of `target` (an element of `siblings`, by identity).
+fn segment_of<T>(
+    siblings: &[T],
+    target: &T,
     name_of: impl Fn(&T) -> &str,
     uuid_of: impl Fn(&T) -> Uuid,
 ) -> Option<Segment> {
-    if name.is_empty() {
-        return None;
-    }
-    let wanted = nfc(name);
-    let mut same: Vec<Uuid> = siblings
-        .iter()
-        .filter(|it| nfc(name_of(it)) == wanted)
-        .map(uuid_of)
-        .collect();
-    same.sort();
-    let ordinal = match same.len() {
-        0 | 1 => None,
-        _ => Some(same.iter().position(|u| *u == target)? + 1),
-    };
-    Segment::new(name, ordinal).ok()
+    let index = siblings.iter().position(|it| std::ptr::eq(it, target))?;
+    sibling_segments(siblings, name_of, uuid_of).swap_remove(index)
 }
 
 /// Find `target` under `group`, pushing each group descended into onto

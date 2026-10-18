@@ -563,6 +563,59 @@ fn every_emitted_path_resolves_back_to_its_own_node() {
 }
 
 #[test]
+fn path_index_agrees_with_path_of_on_awkward_trees() {
+    for snap in [
+        build_snap(),
+        snap_with_untitled_entry_in_same_named_group(),
+        snapshot(Group::new(id(1), "").with_entry(titled(2, "A"))),
+    ] {
+        let index = PathIndex::new(&snap);
+        for (node, _) in snap.walk() {
+            assert_eq!(index.get(node.uuid()), path_of(&snap, node.uuid()).as_ref());
+        }
+        assert_eq!(
+            index.len(),
+            snap.walk()
+                .filter(|(n, _)| path_of(&snap, n.uuid()).is_some())
+                .count()
+        );
+        assert!(index.get(id(999)).is_none());
+    }
+}
+
+#[test]
+fn path_index_is_linear_in_wide_groups() {
+    // 4,000 siblings sharing 1,000 titles (so every title needs ordinals),
+    // listed against UUID order, plus as many sibling groups. path_of is
+    // linear per call, so calling it for every node is quadratic; the index
+    // is one pass.
+    const N: u128 = 4_000;
+    let mut big = Group::new(id(2), "Big");
+    for i in 0..N {
+        big = big.with_entry(titled(1_000_000 - i, &format!("title-{}", i % 1_000)));
+        big = big.with_group(Group::new(
+            id(2_000_000 - i),
+            format!("group-{}", i % 1_000),
+        ));
+    }
+    let snap = snapshot(Group::new(id(1), "Root").with_group(big));
+    let started = std::time::Instant::now();
+    let index = PathIndex::new(&snap);
+    let elapsed = started.elapsed();
+    assert_eq!(index.len(), 2 + 2 * N as usize);
+    // Coarse: a debug build does this in well under a second.
+    assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+    // Spot-check against path_of (each call is linear in the group's width).
+    for (node, _) in snap.walk().step_by(97) {
+        assert_eq!(index.get(node.uuid()), path_of(&snap, node.uuid()).as_ref());
+    }
+    // Every emitted path resolves back to its node.
+    for (uuid, path) in index.iter().take(40) {
+        assert_eq!(path.resolve(&snap).map(NodeRef::uuid), Ok(uuid));
+    }
+}
+
+#[test]
 fn unknown_uuid_has_no_path() {
     let snap = build_snap();
     assert!(path_of(&snap, id(999)).is_none());
@@ -625,7 +678,9 @@ proptest! {
             root = root.with_group(Group::new(id(2000 + i as u128), name.as_str()));
         }
         let snap = snapshot(root.with_group(inner));
+        let index = PathIndex::new(&snap);
         for (node, parent) in snap.walk() {
+            prop_assert_eq!(index.get(node.uuid()).cloned(), path_of(&snap, node.uuid()));
             let named = node.name().is_some_and(|n| !n.is_empty())
                 && parent.is_none_or(|p| p.uuid == id(1) || !p.name.is_empty());
             match path_of(&snap, node.uuid()) {
