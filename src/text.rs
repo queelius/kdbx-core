@@ -119,9 +119,14 @@ pub fn escape_inline(s: &str) -> Cow<'_, str> {
 /// Render `s` as one line per value line, each beginning with `prefix`.
 ///
 /// `s` is split on line feeds and each piece is passed through
-/// [`escape_inline`], so no yielded line contains a line break and each starts
-/// with `prefix`. Stripping the prefix, unescaping and joining the lines with
-/// `\n` gives back `s`. An empty `s` yields one line holding just the prefix.
+/// [`escape_inline`], so no yielded line contains a line break. A non-empty
+/// piece yields `prefix` followed by the escaped piece; an empty piece yields
+/// `prefix` with its trailing whitespace trimmed, so a blank value line never
+/// ends in whitespace (which `git diff --check` flags). The two forms cannot
+/// be confused: a non-empty piece always makes the line longer than the
+/// trimmed prefix. To reverse: a line equal to the trimmed prefix is an empty
+/// piece; otherwise strip `prefix` and unescape; join the pieces with `\n`.
+/// An empty `s` yields one line holding just the trimmed prefix.
 ///
 /// The prefix is written verbatim; callers choose a fixed, printable one (for
 /// example `"    | "`).
@@ -129,9 +134,12 @@ pub fn continuation_lines<'a>(
     s: &'a str,
     prefix: &'a str,
 ) -> impl Iterator<Item = Cow<'a, str>> + 'a {
+    let blank = prefix.trim_end();
     s.split('\n').map(move |line| {
         let body = escape_inline(line);
-        if prefix.is_empty() {
+        if body.is_empty() {
+            Cow::Borrowed(blank)
+        } else if prefix.is_empty() {
             body
         } else {
             let mut out = String::with_capacity(prefix.len() + body.len());
@@ -441,13 +449,14 @@ mod tests {
     #[test]
     fn continuation_lines_prefix_every_line() {
         let lines: Vec<_> = continuation_lines("one\ntwo\n", "    | ").collect();
-        assert_eq!(lines, ["    | one", "    | two", "    | "]);
+        // The blank last piece is the prefix without its trailing space.
+        assert_eq!(lines, ["    | one", "    | two", "    |"]);
     }
 
     #[test]
-    fn continuation_lines_of_empty_value_is_one_bare_prefix() {
+    fn continuation_lines_of_empty_value_is_one_trimmed_prefix() {
         let lines: Vec<_> = continuation_lines("", "  | ").collect();
-        assert_eq!(lines, ["  | "]);
+        assert_eq!(lines, ["  |"]);
     }
 
     #[test]
@@ -468,6 +477,9 @@ mod tests {
         lines
             .iter()
             .map(|l| {
+                if l.as_ref() == prefix.trim_end() {
+                    return String::new();
+                }
                 let body = l.strip_prefix(prefix).expect("prefixed");
                 unescape_inline(body).expect("unescapes").into_owned()
             })
@@ -532,8 +544,17 @@ mod tests {
         ) {
             let lines: Vec<_> = continuation_lines(&s, &prefix).collect();
             for line in &lines {
-                prop_assert!(line.starts_with(prefix.as_str()), "{line:?}");
+                prop_assert!(line.starts_with(prefix.trim_end()), "{line:?}");
+                prop_assert!(
+                    line.as_ref() == prefix.trim_end() || line.starts_with(prefix.as_str()),
+                    "{line:?}"
+                );
                 prop_assert!(!line.chars().any(needs_escape), "{line:?}");
+            }
+            for (line, piece) in lines.iter().zip(s.split('\n')) {
+                if piece.is_empty() {
+                    prop_assert_eq!(line.as_ref(), prefix.trim_end());
+                }
             }
             prop_assert_eq!(rejoin(&lines, &prefix), s);
         }
