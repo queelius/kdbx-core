@@ -74,8 +74,9 @@ pub enum OtpField {
 }
 
 impl OtpField {
-    /// Every OTP field.
-    pub const ALL: [OtpField; 10] = [
+    /// Every OTP field. A slice, not an array, so adding a field to this
+    /// `#[non_exhaustive]` enum is not a breaking change.
+    pub const ALL: &'static [OtpField] = &[
         OtpField::Uri,
         OtpField::LegacySeed,
         OtpField::LegacySettings,
@@ -106,7 +107,7 @@ impl OtpField {
 
     /// The OTP field stored under `name`, if any (exact match).
     pub fn from_kdbx_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|f| f.kdbx_name() == name)
+        Self::ALL.iter().copied().find(|f| f.kdbx_name() == name)
     }
 }
 
@@ -529,8 +530,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn all_is_a_slice_so_new_fields_are_not_a_breaking_change() {
+        let all: &'static [OtpField] = OtpField::ALL;
+        assert_eq!(all.len(), 10);
+    }
+
+    #[test]
     fn field_names_round_trip_and_include_keepass_otp() {
-        for f in OtpField::ALL {
+        for &f in OtpField::ALL {
             assert_eq!(OtpField::from_kdbx_name(f.kdbx_name()), Some(f));
         }
         assert_eq!(OtpField::Uri.kdbx_name(), keepass_0_15::db::fields::OTP);

@@ -66,8 +66,9 @@ pub enum Domain {
 }
 
 impl Domain {
-    /// Every domain.
-    pub const ALL: [Domain; 4] = [
+    /// Every domain. A slice, not an array, so adding a domain to this
+    /// `#[non_exhaustive]` enum is not a breaking change.
+    pub const ALL: &'static [Domain] = &[
         Domain::Field,
         Domain::Attachment,
         Domain::CustomData,
@@ -384,10 +385,16 @@ mod tests {
     }
 
     #[test]
+    fn all_is_a_slice_so_new_domains_are_not_a_breaking_change() {
+        let all: &'static [Domain] = Domain::ALL;
+        assert_eq!(all.len(), 4);
+    }
+
+    #[test]
     fn domain_labels_are_prefix_free_and_versioned() {
-        for a in Domain::ALL {
+        for &a in Domain::ALL {
             assert!(a.label().starts_with("kdbx-core/") && a.label().ends_with("/v1"));
-            for b in Domain::ALL {
+            for &b in Domain::ALL {
                 if a != b {
                     assert!(!b.label().starts_with(a.label()), "{a:?} prefixes {b:?}");
                 }
