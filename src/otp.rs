@@ -371,14 +371,19 @@ impl OtpSource {
             OtpSource::Uri => TotpConfig::from_uri(fields.get(OtpField::Uri).unwrap_or("")),
             OtpSource::KeePassNative => TotpConfig::from_keepass_native(fields),
             OtpSource::Legacy => {
-                match (
-                    fields.get(OtpField::LegacySeed),
-                    fields.get(OtpField::LegacySettings),
-                ) {
-                    (Some(seed), Some(settings)) => TotpConfig::from_legacy(seed, settings),
-                    (None, _) => Err(MalformedReason::MissingField(OtpField::LegacySeed)),
-                    (_, None) => Err(MalformedReason::MissingField(OtpField::LegacySettings)),
-                }
+                // KeePassXC (`Totp::parseSettings`) falls back to its defaults
+                // when `TOTP Settings` is absent or empty, so a lone seed is a
+                // valid 30-second, 6-digit configuration. Settings that are
+                // present but malformed stay an error (never a guessed code).
+                let seed = fields
+                    .get(OtpField::LegacySeed)
+                    .filter(|v| !v.is_empty())
+                    .ok_or(MalformedReason::MissingField(OtpField::LegacySeed))?;
+                let settings = fields
+                    .get(OtpField::LegacySettings)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or(TotpConfig::LEGACY_DEFAULT_SETTINGS);
+                TotpConfig::from_legacy(seed, settings)
             }
         }
     }
@@ -461,6 +466,10 @@ impl TotpConfig {
             encoding,
         )
     }
+
+    /// The `TOTP Settings` value KeePassXC assumes when the field is absent
+    /// or empty: a 30-second period and 6 digits.
+    pub const LEGACY_DEFAULT_SETTINGS: &'static str = "30;6";
 
     /// Build from the legacy pair: a base32 `TOTP Seed` and a `TOTP Settings`
     /// string `period;digits`, where digits `S` means Steam (KeePassXC). A
@@ -1129,9 +1138,23 @@ mod tests {
             resolve_spec(&[("otp", "not-an-otpauth-uri")]).unwrap_err(),
             malformed(OtpSource::Uri, NotAnOtpauthUri)
         );
+        // A lone seed uses KeePassXC's default settings (30 s, 6 digits).
+        let lone = resolve_spec(&[("TOTP Seed", "JBSWY3DPEHPK3PXP")])
+            .unwrap()
+            .expect("a lone legacy seed is a valid configuration");
+        assert_eq!((lone.period(), lone.digits()), (30, 6));
+        let empty = resolve_spec(&[("TOTP Seed", "JBSWY3DPEHPK3PXP"), ("TOTP Settings", "")])
+            .unwrap()
+            .expect("empty settings fall back to the defaults");
+        assert_eq!((empty.period(), empty.digits()), (30, 6));
+        // Present but malformed settings remain an error.
         assert_eq!(
-            resolve_spec(&[("TOTP Seed", "JBSWY3DPEHPK3PXP")]).unwrap_err(),
-            malformed(OtpSource::Legacy, MissingField(OtpField::LegacySettings))
+            resolve_spec(&[
+                ("TOTP Seed", "JBSWY3DPEHPK3PXP"),
+                ("TOTP Settings", "thirty")
+            ])
+            .unwrap_err(),
+            malformed(OtpSource::Legacy, InvalidSettings)
         );
         assert_eq!(
             resolve_spec(&[("TOTP Settings", "30;6")]).unwrap_err(),
