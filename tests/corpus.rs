@@ -231,7 +231,9 @@ macro_rules! adapter_tests {
                 let db = open(&f).unwrap();
                 let codes: Vec<String> = db
                     .iter_all_entries()
-                    .filter_map(|e| kdbx_core::otp::resolve_fields(&otp_fields(&e)))
+                    .filter_map(|e| {
+                        kdbx_core::otp::resolve_fields(&otp_fields(&e)).expect("well-formed OTP")
+                    })
                     .map(|c| c.code_at(59).code().to_owned())
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
@@ -245,7 +247,9 @@ macro_rules! adapter_tests {
                 let db = open(&f).unwrap();
                 let configs: Vec<_> = db
                     .iter_all_entries()
-                    .filter_map(|e| kdbx_core::otp::resolve_fields(&otp_fields(&e)))
+                    .filter_map(|e| {
+                        kdbx_core::otp::resolve_fields(&otp_fields(&e)).expect("well-formed OTP")
+                    })
                     .collect();
                 assert_eq!(configs.len(), 1);
                 assert_eq!(

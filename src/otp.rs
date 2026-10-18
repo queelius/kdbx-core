@@ -1,8 +1,10 @@
 //! TOTP resolution and code computation.
 //!
 //! An entry can carry a TOTP configuration in three historical encodings,
-//! each a set of fields named by [`OtpField`]. They are tried in order, and a
-//! source that is present but malformed falls through to the next:
+//! each a set of fields named by [`OtpField`]. They are tried in order; a
+//! source that is present but malformed falls through to the next, and if no
+//! present source is usable the result is [`OtpError::Malformed`] (never a
+//! silent "no OTP"):
 //!
 //! 1. the `otp` field, an `otpauth://totp/...` URI (KeePassXC);
 //! 2. KeePass 2's native `TimeOtp-*` fields (the `{TIMEOTP}` placeholder);
@@ -17,7 +19,9 @@
 //!
 //! The module never reads a clock: [`TotpConfig::code_at`] takes the time, so
 //! it runs unchanged in WASM. Untrusted parameters are bounds-checked (a zero
-//! period or an unbounded digit count is rejected, not computed).
+//! period or an unbounded digit count is rejected, not computed), and unknown
+//! algorithms or encoders are rejected rather than guessed. Steam Guard codes
+//! ([`TotpEncoding::Steam`]) are supported as KeePassXC writes them.
 //!
 //! ```
 //! use kdbx_core::otp::{resolve_fields, OtpField, OtpFields};
@@ -25,7 +29,7 @@
 //! let fields: OtpFields = [(OtpField::Uri, "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")]
 //!     .into_iter()
 //!     .collect();
-//! let config = resolve_fields(&fields).unwrap();
+//! let config = resolve_fields(&fields).unwrap().expect("configured");
 //! let code = config.code_at(59);
 //! assert_eq!(code.code(), "287082"); // RFC 6238, SHA-1, T = 59
 //! assert_eq!(code.valid_for_seconds(), 1);
@@ -180,6 +184,66 @@ pub enum TotpAlgorithm {
     Sha512,
 }
 
+/// How the truncated HMAC value becomes the displayed code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum TotpEncoding {
+    /// Decimal digits, zero-padded (RFC 6238).
+    #[default]
+    Decimal,
+    /// Steam Guard: five characters of `23456789BCDFGHJKMNPQRTVWXY`, least
+    /// significant first (KeePassXC's `encoder=steam`, or `S` digits in the
+    /// legacy `TOTP Settings`).
+    Steam,
+}
+
+impl TotpEncoding {
+    /// The Steam alphabet.
+    pub const STEAM_ALPHABET: &'static str = "23456789BCDFGHJKMNPQRTVWXY";
+    /// The length of a Steam code.
+    pub const STEAM_DIGITS: u32 = 5;
+}
+
+/// Which of the three encodings an OTP configuration came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum OtpSource {
+    /// The `otp` field's `otpauth://` URI.
+    Uri,
+    /// KeePass 2's `TimeOtp-*` fields.
+    KeePassNative,
+    /// The legacy `TOTP Seed` / `TOTP Settings` pair.
+    Legacy,
+}
+
+/// Why an OTP source that is present could not be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MalformedReason {
+    /// Not an `otpauth://` URI.
+    NotAnOtpauthUri,
+    /// An `otpauth://` URI of another type (`hotp`).
+    NotTotp,
+    /// No secret is given.
+    MissingSecret,
+    /// The secret does not decode, or decodes to nothing.
+    InvalidSecret,
+    /// More than one `TimeOtp-Secret*` field is set.
+    MultipleSecrets,
+    /// The period is not a positive integer.
+    InvalidPeriod,
+    /// The digit count is not an integer in range.
+    InvalidDigits,
+    /// An algorithm other than SHA-1, SHA-256 or SHA-512.
+    UnknownAlgorithm,
+    /// An `encoder` other than `steam`.
+    UnknownEncoder,
+    /// `TOTP Settings` is not `period;digits` (optionally `;url`).
+    InvalidSettings,
+    /// One field of a pair is missing.
+    MissingField(OtpField),
+}
+
 /// A usable TOTP configuration: the decoded secret and its parameters.
 ///
 /// The secret is wiped on drop and never shown by `Debug`.
@@ -189,6 +253,7 @@ pub struct TotpConfig {
     period: u32,
     digits: u32,
     algorithm: TotpAlgorithm,
+    encoding: TotpEncoding,
 }
 
 /// A computed code and its remaining lifetime. `Debug` hides the code.
@@ -199,7 +264,7 @@ pub struct TotpCode {
     period_seconds: u32,
 }
 
-/// Why [`resolve`] could not read an entry's TOTP configuration.
+/// Why an entry's TOTP configuration could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OtpError {
@@ -207,20 +272,49 @@ pub enum OtpError {
     /// available. Resolve from the live entry's `otp_fields` instead, or
     /// capture under `Sealing::Reveal`.
     Sealed(OtpField),
+    /// OTP is configured but no source is usable; this is the first
+    /// malformed source in precedence order.
+    Malformed {
+        /// The source that is malformed.
+        source: OtpSource,
+        /// What is wrong with it.
+        reason: MalformedReason,
+    },
+}
+
+impl fmt::Display for MalformedReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MalformedReason::NotAnOtpauthUri => f.write_str("not an otpauth:// URI"),
+            MalformedReason::NotTotp => f.write_str("not a TOTP (otpauth://totp/) URI"),
+            MalformedReason::MissingSecret => f.write_str("no secret"),
+            MalformedReason::InvalidSecret => f.write_str("the secret does not decode"),
+            MalformedReason::MultipleSecrets => f.write_str("more than one TimeOtp-Secret field"),
+            MalformedReason::InvalidPeriod => f.write_str("invalid period"),
+            MalformedReason::InvalidDigits => f.write_str("invalid digit count"),
+            MalformedReason::UnknownAlgorithm => f.write_str("unknown algorithm"),
+            MalformedReason::UnknownEncoder => f.write_str("unknown encoder"),
+            MalformedReason::InvalidSettings => f.write_str("TOTP Settings is not period;digits"),
+            MalformedReason::MissingField(field) => write!(f, "missing field '{field}'"),
+        }
+    }
 }
 
 impl fmt::Display for OtpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             OtpError::Sealed(field) => write!(f, "OTP field '{field}' is sealed in this snapshot"),
+            OtpError::Malformed { source, reason } => {
+                write!(f, "malformed OTP configuration ({source:?}): {reason}")
+            }
         }
     }
 }
 
 impl std::error::Error for OtpError {}
 
-/// The TOTP configuration of a snapshot entry, or `None` when no source
-/// yields a usable one.
+/// The TOTP configuration of a snapshot entry: `Ok(None)` when it has none,
+/// an error when an OTP field is sealed or the configuration is malformed.
 pub fn resolve(entry: &Entry) -> Result<Option<TotpConfig>, OtpError> {
     let mut fields = OtpFields::new();
     for (name, field) in &entry.fields {
@@ -232,22 +326,79 @@ pub fn resolve(entry: &Entry) -> Result<Option<TotpConfig>, OtpError> {
             Value::Sealed(_) => return Err(OtpError::Sealed(otp_field)),
         }
     }
-    Ok(resolve_fields(&fields))
+    resolve_fields(&fields)
 }
 
-/// The TOTP configuration carried by `fields`, trying the URI, then the
-/// KeePass 2 native fields, then the legacy pair. `None` when no source
-/// yields a usable configuration.
-pub fn resolve_fields(fields: &OtpFields) -> Option<TotpConfig> {
-    fields
-        .get(OtpField::Uri)
-        .and_then(TotpConfig::from_uri)
-        .or_else(|| TotpConfig::from_keepass_native(fields))
-        .or_else(|| {
-            let seed = fields.get(OtpField::LegacySeed)?;
-            let settings = fields.get(OtpField::LegacySettings)?;
-            TotpConfig::from_legacy(seed, settings)
-        })
+/// The TOTP configuration carried by `fields`.
+///
+/// Sources are tried in precedence order (URI, KeePass 2 native fields,
+/// legacy pair); a source counts as present when any of its fields is
+/// non-empty. The first well-formed present source wins, so a malformed
+/// source falls through to a later one. `Ok(None)` when no source is present;
+/// [`OtpError::Malformed`] (for the first malformed source) when sources are
+/// present but none is usable.
+pub fn resolve_fields(fields: &OtpFields) -> Result<Option<TotpConfig>, OtpError> {
+    let mut first_error = None;
+    for &source in OtpSource::PRECEDENCE {
+        if !source.is_present(fields) {
+            continue;
+        }
+        match source.parse(fields) {
+            Ok(config) => return Ok(Some(config)),
+            Err(reason) => {
+                first_error.get_or_insert(OtpError::Malformed { source, reason });
+            }
+        }
+    }
+    first_error.map_or(Ok(None), Err)
+}
+
+impl OtpSource {
+    /// The sources in the order [`resolve_fields`] tries them.
+    pub const PRECEDENCE: &'static [OtpSource] =
+        &[OtpSource::Uri, OtpSource::KeePassNative, OtpSource::Legacy];
+
+    /// Whether any of this source's fields is non-empty in `fields`.
+    pub fn is_present(self, fields: &OtpFields) -> bool {
+        self.fields()
+            .iter()
+            .any(|&field| fields.get(field).is_some_and(|v| !v.is_empty()))
+    }
+
+    /// Read this source's configuration from `fields`.
+    pub fn parse(self, fields: &OtpFields) -> Result<TotpConfig, MalformedReason> {
+        match self {
+            OtpSource::Uri => TotpConfig::from_uri(fields.get(OtpField::Uri).unwrap_or("")),
+            OtpSource::KeePassNative => TotpConfig::from_keepass_native(fields),
+            OtpSource::Legacy => {
+                match (
+                    fields.get(OtpField::LegacySeed),
+                    fields.get(OtpField::LegacySettings),
+                ) {
+                    (Some(seed), Some(settings)) => TotpConfig::from_legacy(seed, settings),
+                    (None, _) => Err(MalformedReason::MissingField(OtpField::LegacySeed)),
+                    (_, None) => Err(MalformedReason::MissingField(OtpField::LegacySettings)),
+                }
+            }
+        }
+    }
+
+    /// The fields this source reads.
+    pub fn fields(self) -> &'static [OtpField] {
+        match self {
+            OtpSource::Uri => &[OtpField::Uri],
+            OtpSource::KeePassNative => &[
+                OtpField::NativeSecret,
+                OtpField::NativeSecretHex,
+                OtpField::NativeSecretBase32,
+                OtpField::NativeSecretBase64,
+                OtpField::NativeLength,
+                OtpField::NativePeriod,
+                OtpField::NativeAlgorithm,
+            ],
+            OtpSource::Legacy => &[OtpField::LegacySeed, OtpField::LegacySettings],
+        }
+    }
 }
 
 impl TotpConfig {
@@ -259,16 +410,20 @@ impl TotpConfig {
     /// KeePass's own cap on `TimeOtp-Length`.
     pub const NATIVE_MAX_DIGITS: u32 = 8;
 
-    /// Parse an `otpauth://totp/...` URI. `None` unless the scheme is
-    /// `otpauth`, the type is `totp`, and a valid base32 `secret` is present;
-    /// `period` (default 30), `digits` (default 6) and `algorithm` (default
-    /// SHA1; unknown values fall back to SHA1) are optional.
-    pub fn from_uri(uri: &str) -> Option<Self> {
+    /// Parse an `otpauth://totp/...` URI.
+    ///
+    /// A base32 `secret` is required. `period` (default 30), `digits`
+    /// (default 6), `algorithm` (`SHA1` default, `SHA256`, `SHA512`) and
+    /// `encoder` (only `steam`, which yields five Steam characters) are
+    /// optional; any other algorithm or encoder is rejected rather than
+    /// guessed.
+    pub fn from_uri(uri: &str) -> Result<Self, MalformedReason> {
+        use MalformedReason::*;
         // RFC 3986 generic syntax: scheme "://" authority path ["?" query]
         // ["#" fragment]. For otpauth the authority is the OTP type.
-        let (scheme, rest) = uri.split_once("://")?;
+        let (scheme, rest) = uri.split_once("://").ok_or(NotAnOtpauthUri)?;
         if !scheme.eq_ignore_ascii_case("otpauth") {
-            return None;
+            return Err(NotAnOtpauthUri);
         }
         let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
         let (authority_and_path, query) = rest.split_once('?').unwrap_or((rest, ""));
@@ -276,40 +431,66 @@ impl TotpConfig {
             .split_once('/')
             .map_or(authority_and_path, |(authority, _)| authority);
         if !authority.eq_ignore_ascii_case("totp") {
-            return None;
+            return Err(NotTotp);
         }
 
         let mut secret = None;
         let mut period = 30u32;
         let mut digits = 6u32;
         let mut algorithm = TotpAlgorithm::Sha1;
+        let mut encoding = TotpEncoding::Decimal;
         for (key, value) in form_urlencoded::parse(query.as_bytes()) {
             match key.as_ref() {
-                "secret" => secret = decode_base32_secret(&value),
-                "period" => period = value.trim().parse().ok()?,
-                "digits" => digits = value.trim().parse().ok()?,
-                "algorithm" => algorithm = uri_algorithm(&value),
+                "secret" => secret = Some(decode_base32_secret(&value).ok_or(InvalidSecret)?),
+                "period" => period = value.trim().parse().map_err(|_| InvalidPeriod)?,
+                "digits" => digits = value.trim().parse().map_err(|_| InvalidDigits)?,
+                "algorithm" => algorithm = uri_algorithm(&value)?,
+                "encoder" if value.eq_ignore_ascii_case("steam") => encoding = TotpEncoding::Steam,
+                "encoder" => return Err(UnknownEncoder),
                 _ => {}
             }
         }
-        Self::checked(secret?, period, digits, algorithm)
+        if encoding == TotpEncoding::Steam {
+            digits = TotpEncoding::STEAM_DIGITS;
+        }
+        Self::checked(
+            secret.ok_or(MissingSecret)?,
+            period,
+            digits,
+            algorithm,
+            encoding,
+        )
     }
 
-    /// Build from the legacy pair: a base32 `TOTP Seed` and a `period;digits`
-    /// `TOTP Settings` string (always SHA1).
-    pub fn from_legacy(seed: &str, settings: &str) -> Option<Self> {
-        let secret = decode_base32_secret(seed)?;
-        let (period, digits) = settings.split_once(';')?;
-        let period = period.trim().parse().ok()?;
-        let digits = digits.trim().parse().ok()?;
-        Self::checked(secret, period, digits, TotpAlgorithm::Sha1)
+    /// Build from the legacy pair: a base32 `TOTP Seed` and a `TOTP Settings`
+    /// string `period;digits`, where digits `S` means Steam (KeePassXC). A
+    /// third part (KeeTrayTOTP's time-correction URL) is ignored. Always SHA-1.
+    pub fn from_legacy(seed: &str, settings: &str) -> Result<Self, MalformedReason> {
+        use MalformedReason::*;
+        let secret = decode_base32_secret(seed).ok_or(InvalidSecret)?;
+        let parts: Vec<&str> = settings.split(';').map(str::trim).collect();
+        let (period, digits) = match parts.as_slice() {
+            [period, digits] | [period, digits, _] => (*period, *digits),
+            _ => return Err(InvalidSettings),
+        };
+        let period = period.parse().map_err(|_| InvalidPeriod)?;
+        let (digits, encoding) = if digits == "S" {
+            (TotpEncoding::STEAM_DIGITS, TotpEncoding::Steam)
+        } else {
+            (
+                digits.parse().map_err(|_| InvalidDigits)?,
+                TotpEncoding::Decimal,
+            )
+        };
+        Self::checked(secret, period, digits, TotpAlgorithm::Sha1, encoding)
     }
 
     /// Build from KeePass 2's native `TimeOtp-*` fields. Exactly one non-empty
     /// secret field must be present (an empty one is skipped, as KeePass
     /// does); length (1..=8, default 6), period (default 30) and algorithm
-    /// (default `HMAC-SHA-1`) are optional. Any malformed value yields `None`.
-    pub fn from_keepass_native(fields: &OtpFields) -> Option<Self> {
+    /// (`HMAC-SHA-1` default, `HMAC-SHA-256`, `HMAC-SHA-512`) are optional.
+    pub fn from_keepass_native(fields: &OtpFields) -> Result<Self, MalformedReason> {
+        use MalformedReason::*;
         let decoders: [(OtpField, SecretDecoder); 4] = [
             (OtpField::NativeSecret, |v| Some(v.as_bytes().to_vec())),
             (OtpField::NativeSecretHex, |v| {
@@ -320,60 +501,65 @@ impl TotpConfig {
                 BASE64.decode(compact(v).as_bytes()).ok()
             }),
         ];
-        // An empty secret field does not count (KeePass skips it).
         let mut present = decoders.iter().filter_map(|(field, decode)| {
             fields
                 .get(*field)
                 .filter(|v| !v.is_empty())
                 .map(|v| (*decode, v))
         });
-        let (decode, value) = present.next()?;
+        let (decode, value) = present.next().ok_or(MissingSecret)?;
         if present.next().is_some() {
-            return None;
+            return Err(MultipleSecrets);
         }
-        let secret = decode(value)?;
+        let secret = decode(value).ok_or(InvalidSecret)?;
 
         let digits = match fields.get(OtpField::NativeLength) {
             Some(v) => v
                 .trim()
                 .parse()
                 .ok()
-                .filter(|d| *d <= Self::NATIVE_MAX_DIGITS)?,
+                .filter(|d| *d <= Self::NATIVE_MAX_DIGITS)
+                .ok_or(InvalidDigits)?,
             None => 6,
         };
         let period = match fields.get(OtpField::NativePeriod) {
-            Some(v) => v.trim().parse().ok()?,
+            Some(v) => v.trim().parse().map_err(|_| InvalidPeriod)?,
             None => 30,
         };
         let algorithm = match fields.get(OtpField::NativeAlgorithm).map(str::trim) {
             None | Some("HMAC-SHA-1") => TotpAlgorithm::Sha1,
             Some("HMAC-SHA-256") => TotpAlgorithm::Sha256,
             Some("HMAC-SHA-512") => TotpAlgorithm::Sha512,
-            Some(_) => return None,
+            Some(_) => return Err(UnknownAlgorithm),
         };
-        Self::checked(secret, period, digits, algorithm)
+        Self::checked(secret, period, digits, algorithm, TotpEncoding::Decimal)
     }
 
-    /// A config, or `None` when the secret is empty or a parameter would make
-    /// the computation divide by zero or overflow.
+    /// A config, or the reason it is unusable: an empty secret, or a
+    /// parameter that would make the computation divide by zero or overflow.
     fn checked(
         secret: Vec<u8>,
         period: u32,
         digits: u32,
         algorithm: TotpAlgorithm,
-    ) -> Option<Self> {
+        encoding: TotpEncoding,
+    ) -> Result<Self, MalformedReason> {
         let secret = Zeroizing::new(secret);
-        if secret.is_empty()
-            || period < Self::MIN_PERIOD
-            || !(1..=Self::MAX_DIGITS).contains(&digits)
-        {
-            return None;
+        if secret.is_empty() {
+            return Err(MalformedReason::InvalidSecret);
         }
-        Some(TotpConfig {
+        if period < Self::MIN_PERIOD {
+            return Err(MalformedReason::InvalidPeriod);
+        }
+        if !(1..=Self::MAX_DIGITS).contains(&digits) {
+            return Err(MalformedReason::InvalidDigits);
+        }
+        Ok(TotpConfig {
             secret,
             period,
             digits,
             algorithm,
+            encoding,
         })
     }
 
@@ -390,6 +576,11 @@ impl TotpConfig {
     /// The HMAC hash.
     pub fn algorithm(&self) -> TotpAlgorithm {
         self.algorithm
+    }
+
+    /// How codes are rendered.
+    pub fn encoding(&self) -> TotpEncoding {
+        self.encoding
     }
 
     /// The code for the time step containing `unix_time` (RFC 6238).
@@ -409,12 +600,29 @@ impl TotpConfig {
             mac[offset + 2],
             mac[offset + 3],
         ]) & 0x7fff_ffff;
-        let value = u64::from(truncated) % 10u64.pow(self.digits);
-        let width = self.digits as usize;
+        let code = match self.encoding {
+            TotpEncoding::Decimal => {
+                let value = u64::from(truncated) % 10u64.pow(self.digits);
+                let width = self.digits as usize;
+                format!("{value:0width$}")
+            }
+            TotpEncoding::Steam => {
+                let alphabet = TotpEncoding::STEAM_ALPHABET.as_bytes();
+                let base = alphabet.len() as u32;
+                let mut value = truncated;
+                (0..self.digits)
+                    .map(|_| {
+                        let c = char::from(alphabet[(value % base) as usize]);
+                        value /= base;
+                        c
+                    })
+                    .collect()
+            }
+        };
         // `period - elapsed` is in 1..=period, so it fits u32.
         let valid_for = u32::try_from(period - unix_time % period).unwrap_or(self.period);
         TotpCode {
-            code: Zeroizing::new(format!("{value:0width$}")),
+            code: Zeroizing::new(code),
             valid_for_seconds: valid_for,
             period_seconds: self.period,
         }
@@ -439,12 +647,13 @@ impl fmt::Debug for TotpConfig {
             .field("period", &self.period)
             .field("digits", &self.digits)
             .field("algorithm", &self.algorithm)
+            .field("encoding", &self.encoding)
             .finish()
     }
 }
 
 impl TotpCode {
-    /// The code digits.
+    /// The code (digits, or Steam characters).
     pub fn code(&self) -> &str {
         &self.code
     }
@@ -504,16 +713,17 @@ fn decode_base32_secret(s: &str) -> Option<Vec<u8>> {
     (!bytes.is_empty()).then_some(bytes)
 }
 
-/// An otpauth `algorithm` value, case-insensitively; unknown values fall back
-/// to SHA1, the otpauth default.
-fn uri_algorithm(value: &str) -> TotpAlgorithm {
-    if value.eq_ignore_ascii_case("SHA256") {
-        TotpAlgorithm::Sha256
-    } else if value.eq_ignore_ascii_case("SHA512") {
-        TotpAlgorithm::Sha512
-    } else {
-        TotpAlgorithm::Sha1
-    }
+/// An otpauth `algorithm` value, case-insensitively.
+fn uri_algorithm(value: &str) -> Result<TotpAlgorithm, MalformedReason> {
+    [
+        ("SHA1", TotpAlgorithm::Sha1),
+        ("SHA256", TotpAlgorithm::Sha256),
+        ("SHA512", TotpAlgorithm::Sha512),
+    ]
+    .into_iter()
+    .find(|(name, _)| value.trim().eq_ignore_ascii_case(name))
+    .map(|(_, algorithm)| algorithm)
+    .ok_or(MalformedReason::UnknownAlgorithm)
 }
 
 /// HMAC of `message` under `key` with the MAC type `M`.
@@ -556,7 +766,7 @@ mod tests {
         assert!(shown.contains("LegacySeed"), "{shown}");
     }
 
-    // TOTP: ported from mcp-kdbx's totp.rs tests.
+    // TOTP: ported from mcp-kdbx's totp.rs tests, plus Steam and typed errors.
 
     const SAMPLE_URI: &str =
         "otpauth://totp/Example:alice@google.com?secret=JBSWY3DPEHPK3PXP&issuer=Example";
@@ -565,7 +775,7 @@ mod tests {
     /// RFC 6238 SHA-1 at T = 59, six digits.
     const RFC_SHA1_AT_59: &str = "287082";
 
-    fn uri(params: &str) -> Option<TotpConfig> {
+    fn uri(params: &str) -> Result<TotpConfig, MalformedReason> {
         TotpConfig::from_uri(&format!("otpauth://totp/Test?{params}"))
     }
 
@@ -580,8 +790,18 @@ mod tests {
             .collect()
     }
 
-    fn resolve_spec(spec: &[(&str, &str)]) -> Option<TotpConfig> {
+    fn resolve_spec(spec: &[(&str, &str)]) -> Result<Option<TotpConfig>, OtpError> {
         resolve_fields(&by_name(spec))
+    }
+
+    fn configured(spec: &[(&str, &str)]) -> TotpConfig {
+        resolve_spec(spec)
+            .expect("well-formed")
+            .expect("configured")
+    }
+
+    fn malformed(source: OtpSource, reason: MalformedReason) -> OtpError {
+        OtpError::Malformed { source, reason }
     }
 
     #[test]
@@ -590,6 +810,7 @@ mod tests {
         assert_eq!(cfg.period(), 30);
         assert_eq!(cfg.digits(), 6);
         assert_eq!(cfg.algorithm(), TotpAlgorithm::Sha1);
+        assert_eq!(cfg.encoding(), TotpEncoding::Decimal);
     }
 
     #[test]
@@ -605,12 +826,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_otpauth_and_hotp_and_non_url() {
-        assert!(TotpConfig::from_uri("https://example.com/").is_none());
-        assert!(TotpConfig::from_uri("otpauth://hotp/foo?secret=JBSWY3DPEHPK3PXP").is_none());
-        assert!(TotpConfig::from_uri("not a url").is_none());
-        assert!(TotpConfig::from_uri("").is_none());
-        assert!(TotpConfig::from_uri("otpauth:totp?secret=JBSWY3DPEHPK3PXP").is_none());
+    fn rejects_non_otpauth_and_hotp_and_non_url_with_reasons() {
+        use MalformedReason::*;
+        assert_eq!(
+            TotpConfig::from_uri("https://example.com/").unwrap_err(),
+            NotAnOtpauthUri
+        );
+        assert_eq!(
+            TotpConfig::from_uri("not a url").unwrap_err(),
+            NotAnOtpauthUri
+        );
+        assert_eq!(TotpConfig::from_uri("").unwrap_err(), NotAnOtpauthUri);
+        assert_eq!(
+            TotpConfig::from_uri("otpauth:totp?secret=JBSWY3DPEHPK3PXP").unwrap_err(),
+            NotAnOtpauthUri
+        );
+        assert_eq!(
+            TotpConfig::from_uri("otpauth://hotp/foo?secret=JBSWY3DPEHPK3PXP").unwrap_err(),
+            NotTotp
+        );
     }
 
     #[test]
@@ -618,25 +852,31 @@ mod tests {
         let cfg =
             TotpConfig::from_uri("OTPAUTH://TOTP/x?secret=JBSWY3DPEHPK3PXP#frag").expect("parse");
         assert_eq!(cfg.period(), 30);
-        // A secret that is only inside the fragment does not count.
-        assert!(TotpConfig::from_uri("otpauth://totp/x#?secret=JBSWY3DPEHPK3PXP").is_none());
+        assert_eq!(
+            TotpConfig::from_uri("otpauth://totp/x#?secret=JBSWY3DPEHPK3PXP").unwrap_err(),
+            MalformedReason::MissingSecret
+        );
     }
 
     #[test]
     fn uri_query_is_percent_decoded() {
-        let cfg = TotpConfig::from_uri(&format!(
-            "otpauth://totp/a%2Fb?secret={}%3D%3D",
-            "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-        ))
-        .expect("percent-encoded padding decodes");
+        let cfg =
+            TotpConfig::from_uri(&format!("otpauth://totp/a%2Fb?secret={RFC_SHA1_B32}%3D%3D"))
+                .expect("percent-encoded padding decodes");
         assert_eq!(cfg.code_at(59).code(), RFC_SHA1_AT_59);
     }
 
     #[test]
-    fn rejects_missing_secret() {
-        assert!(uri("period=30").is_none());
-        assert!(uri("secret=").is_none());
-        assert!(uri("secret=not-base32!").is_none());
+    fn missing_or_bad_secrets_are_distinguished() {
+        assert_eq!(
+            uri("period=30").unwrap_err(),
+            MalformedReason::MissingSecret
+        );
+        assert_eq!(uri("secret=").unwrap_err(), MalformedReason::InvalidSecret);
+        assert_eq!(
+            uri("secret=not-base32!").unwrap_err(),
+            MalformedReason::InvalidSecret
+        );
     }
 
     #[test]
@@ -656,7 +896,7 @@ mod tests {
             TotpAlgorithm::Sha512
         );
         assert_eq!(
-            uri("secret=JBSWY3DPEHPK3PXP&algorithm=MD5")
+            uri("secret=JBSWY3DPEHPK3PXP&algorithm=SHA1")
                 .unwrap()
                 .algorithm(),
             TotpAlgorithm::Sha1
@@ -664,8 +904,59 @@ mod tests {
     }
 
     #[test]
+    fn unknown_algorithms_and_encoders_are_rejected_not_guessed() {
+        assert_eq!(
+            uri("secret=JBSWY3DPEHPK3PXP&algorithm=SHA3-256").unwrap_err(),
+            MalformedReason::UnknownAlgorithm
+        );
+        assert_eq!(
+            uri("secret=JBSWY3DPEHPK3PXP&algorithm=MD5").unwrap_err(),
+            MalformedReason::UnknownAlgorithm
+        );
+        assert_eq!(
+            uri("secret=JBSWY3DPEHPK3PXP&encoder=base26").unwrap_err(),
+            MalformedReason::UnknownEncoder
+        );
+    }
+
+    #[test]
+    fn steam_uri_produces_five_steam_characters() {
+        // Vectors computed independently (Python hmac) from KeePassXC's Steam
+        // encoder: RFC 4226 dynamic truncation, then five characters of
+        // "23456789BCDFGHJKMNPQRTVWXY", least significant first.
+        let cfg = uri(&format!(
+            "secret={RFC_SHA1_B32}&digits=5&issuer=Steam&encoder=steam"
+        ))
+        .expect("steam");
+        assert_eq!(cfg.encoding(), TotpEncoding::Steam);
+        assert_eq!(cfg.digits(), 5);
+        for (t, want) in [
+            (59, "PV9M4"),
+            (1_111_111_109, "PY4YB"),
+            (1_234_567_890, "VHHQY"),
+            (2_000_000_000, "9N776"),
+        ] {
+            assert_eq!(cfg.code_at(t).code(), want, "t = {t}");
+        }
+        // The Steam encoder always yields five characters.
+        assert_eq!(
+            uri(&format!("secret={RFC_SHA1_B32}&encoder=Steam"))
+                .unwrap()
+                .digits(),
+            5
+        );
+    }
+
+    #[test]
+    fn steam_legacy_settings() {
+        // KeePassXC's legacy TOTP Settings write "S" for Steam digits.
+        let cfg = TotpConfig::from_legacy(RFC_SHA1_B32, "30;S").expect("steam legacy");
+        assert_eq!(cfg.encoding(), TotpEncoding::Steam);
+        assert_eq!(cfg.code_at(59).code(), "PV9M4");
+    }
+
+    #[test]
     fn rfc_6238_vectors() {
-        // RFC 6238 appendix B: 8-digit codes for each hash.
         let sha1 = "12345678901234567890";
         let sha256 = "12345678901234567890123456789012";
         let sha512 = "1234567890123456789012345678901234567890123456789012345678901234";
@@ -683,12 +974,11 @@ mod tests {
                 (sha256, "HMAC-SHA-256", want256),
                 (sha512, "HMAC-SHA-512", want512),
             ] {
-                let cfg = resolve_spec(&[
+                let cfg = configured(&[
                     ("TimeOtp-Secret", secret),
                     ("TimeOtp-Length", "8"),
                     ("TimeOtp-Algorithm", algorithm),
-                ])
-                .expect("resolves");
+                ]);
                 assert_eq!(cfg.code_at(t).code(), want, "{algorithm} at {t}");
             }
         }
@@ -710,12 +1000,10 @@ mod tests {
 
     #[test]
     fn codes_are_zero_padded() {
-        // RFC 6238 SHA-1 at 1111111109 is 07081804: the leading zero stays.
-        let cfg = resolve_spec(&[
+        let cfg = configured(&[
             ("TimeOtp-Secret", "12345678901234567890"),
             ("TimeOtp-Length", "8"),
-        ])
-        .unwrap();
+        ]);
         assert_eq!(cfg.code_at(1_111_111_109).code(), "07081804");
     }
 
@@ -729,23 +1017,68 @@ mod tests {
         assert_eq!(cfg.code_at(59).code(), RFC_SHA1_AT_59);
         let cfg = TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", " 60 ; 8 ").expect("whitespace");
         assert_eq!((cfg.period(), cfg.digits()), (60, 8));
+        // KeeTrayTOTP appends a time-correction URL; it is ignored (no clock).
+        let cfg = TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "30;6;https://time.example")
+            .expect("3 parts");
+        assert_eq!(cfg.digits(), 6);
     }
 
     #[test]
     fn from_legacy_rejects_empty_or_malformed() {
-        assert!(TotpConfig::from_legacy("", "30;6").is_none());
-        assert!(TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "30").is_none());
-        assert!(TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "thirty;six").is_none());
+        use MalformedReason::*;
+        assert_eq!(
+            TotpConfig::from_legacy("", "30;6").unwrap_err(),
+            InvalidSecret
+        );
+        assert_eq!(
+            TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "30").unwrap_err(),
+            InvalidSettings
+        );
+        assert_eq!(
+            TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "thirty;six").unwrap_err(),
+            InvalidPeriod
+        );
+        assert_eq!(
+            TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "30;six").unwrap_err(),
+            InvalidDigits
+        );
+        assert_eq!(
+            TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "30;6;x;y").unwrap_err(),
+            InvalidSettings
+        );
     }
 
     #[test]
     fn dangerous_parameters_are_rejected_without_panic() {
-        assert!(uri("secret=JBSWY3DPEHPK3PXP&period=0").is_none());
-        assert!(uri("secret=JBSWY3DPEHPK3PXP&digits=20").is_none());
-        assert!(uri("secret=JBSWY3DPEHPK3PXP&digits=0").is_none());
-        assert!(TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "0;6").is_none());
-        assert!(TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "30;20").is_none());
-        assert!(TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "30;0").is_none());
+        use MalformedReason::*;
+        assert_eq!(
+            uri("secret=JBSWY3DPEHPK3PXP&period=0").unwrap_err(),
+            InvalidPeriod
+        );
+        assert_eq!(
+            uri("secret=JBSWY3DPEHPK3PXP&period=abc").unwrap_err(),
+            InvalidPeriod
+        );
+        assert_eq!(
+            uri("secret=JBSWY3DPEHPK3PXP&digits=20").unwrap_err(),
+            InvalidDigits
+        );
+        assert_eq!(
+            uri("secret=JBSWY3DPEHPK3PXP&digits=0").unwrap_err(),
+            InvalidDigits
+        );
+        assert_eq!(
+            TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "0;6").unwrap_err(),
+            InvalidPeriod
+        );
+        assert_eq!(
+            TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "30;20").unwrap_err(),
+            InvalidDigits
+        );
+        assert_eq!(
+            TotpConfig::from_legacy("JBSWY3DPEHPK3PXP", "30;0").unwrap_err(),
+            InvalidDigits
+        );
     }
 
     #[test]
@@ -768,21 +1101,57 @@ mod tests {
     fn resolve_prefers_otpauth_then_native_then_legacy() {
         let modern = ("otp", "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP");
         let legacy = [("TOTP Seed", "JBSWY3DPEHPK3PXP"), ("TOTP Settings", "30;6")];
-        assert!(resolve_spec(&[modern]).is_some());
-        assert!(resolve_spec(&legacy).is_some());
-        assert!(resolve_spec(&legacy[..1]).is_none());
-        assert!(resolve_spec(&[]).is_none());
+        assert!(resolve_spec(&[modern]).unwrap().is_some());
+        assert!(resolve_spec(&legacy).unwrap().is_some());
+        // A malformed source falls through to a later well-formed one.
         let mut fallthrough = vec![("otp", "not-an-otpauth-uri")];
         fallthrough.extend_from_slice(&legacy);
-        assert!(resolve_spec(&fallthrough).is_some());
+        assert!(resolve_spec(&fallthrough).unwrap().is_some());
         let both = [
             ("TimeOtp-Secret", "12345678901234567890"),
             ("TOTP Seed", "JBSWY3DPEHPK3PXP"),
             ("TOTP Settings", "30;8"),
         ];
+        assert_eq!(configured(&both).code_at(59).code(), RFC_SHA1_AT_59);
+    }
+
+    #[test]
+    fn no_otp_is_ok_none_and_malformed_otp_is_an_error() {
+        use MalformedReason::*;
+        assert!(resolve_spec(&[]).unwrap().is_none());
+        // Empty fields are absent, as KeePass treats them.
+        assert!(
+            resolve_spec(&[("otp", ""), ("TimeOtp-Secret-Hex", "")])
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
-            resolve_spec(&both).expect("native").code_at(59).code(),
-            RFC_SHA1_AT_59
+            resolve_spec(&[("otp", "not-an-otpauth-uri")]).unwrap_err(),
+            malformed(OtpSource::Uri, NotAnOtpauthUri)
+        );
+        assert_eq!(
+            resolve_spec(&[("TOTP Seed", "JBSWY3DPEHPK3PXP")]).unwrap_err(),
+            malformed(OtpSource::Legacy, MissingField(OtpField::LegacySettings))
+        );
+        assert_eq!(
+            resolve_spec(&[("TOTP Settings", "30;6")]).unwrap_err(),
+            malformed(OtpSource::Legacy, MissingField(OtpField::LegacySeed))
+        );
+        assert_eq!(
+            resolve_spec(&[("TimeOtp-Length", "8")]).unwrap_err(),
+            malformed(OtpSource::KeePassNative, MissingSecret)
+        );
+        // With several malformed sources, the first in precedence is reported.
+        assert_eq!(
+            resolve_spec(&[
+                (
+                    "otp",
+                    "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&algorithm=SHA3-256"
+                ),
+                ("TOTP Seed", "!")
+            ])
+            .unwrap_err(),
+            malformed(OtpSource::Uri, UnknownAlgorithm)
         );
     }
 
@@ -797,7 +1166,7 @@ mod tests {
             ("TimeOtp-Secret-Base32", RFC_SHA1_B32),
             ("TimeOtp-Secret-Base64", "MTIzNDU2Nzg5MDEyMzQ1Njc4OTA="),
         ] {
-            let cfg = resolve_spec(&[(field, value)]).unwrap_or_else(|| panic!("{field}"));
+            let cfg = configured(&[(field, value)]);
             assert_eq!((cfg.period(), cfg.digits()), (30, 6), "{field} defaults");
             assert_eq!(cfg.code_at(59).code(), RFC_SHA1_AT_59, "{field}");
         }
@@ -805,30 +1174,45 @@ mod tests {
 
     #[test]
     fn empty_native_secret_fields_are_ignored_when_counting() {
-        let cfg = resolve_spec(&[
+        let cfg = configured(&[
             ("TimeOtp-Secret", ""),
             ("TimeOtp-Secret-Base32", RFC_SHA1_B32),
-        ])
-        .expect("the non-empty secret is used");
+        ]);
         assert_eq!(cfg.code_at(59).code(), RFC_SHA1_AT_59);
-        assert!(resolve_spec(&[("TimeOtp-Secret-Hex", "")]).is_none());
     }
 
     #[test]
     fn keepass_native_length_period_and_algorithm() {
-        let cfg = resolve_spec(&[
+        use MalformedReason::*;
+        let cfg = configured(&[
             ("TimeOtp-Secret", "12345678901234567890123456789012"),
             ("TimeOtp-Length", "8"),
             ("TimeOtp-Period", "30"),
             ("TimeOtp-Algorithm", "HMAC-SHA-256"),
-        ])
-        .expect("resolves");
+        ]);
         assert_eq!(cfg.algorithm(), TotpAlgorithm::Sha256);
         assert_eq!(cfg.code_at(59).code(), "46119246");
-        assert!(resolve_spec(&[("TimeOtp-Secret", "x"), ("TimeOtp-Length", "9")]).is_none());
-        assert!(resolve_spec(&[("TimeOtp-Secret", "x"), ("TimeOtp-Algorithm", "MD5")]).is_none());
-        assert!(resolve_spec(&[("TimeOtp-Secret", "x"), ("TimeOtp-Secret-Hex", "78")]).is_none());
-        assert!(resolve_spec(&[("TimeOtp-Secret", "x"), ("TimeOtp-Period", "0")]).is_none());
+        let native = |reason| malformed(OtpSource::KeePassNative, reason);
+        assert_eq!(
+            resolve_spec(&[("TimeOtp-Secret", "x"), ("TimeOtp-Length", "9")]).unwrap_err(),
+            native(InvalidDigits)
+        );
+        assert_eq!(
+            resolve_spec(&[("TimeOtp-Secret", "x"), ("TimeOtp-Algorithm", "MD5")]).unwrap_err(),
+            native(UnknownAlgorithm)
+        );
+        assert_eq!(
+            resolve_spec(&[("TimeOtp-Secret", "x"), ("TimeOtp-Secret-Hex", "78")]).unwrap_err(),
+            native(MultipleSecrets)
+        );
+        assert_eq!(
+            resolve_spec(&[("TimeOtp-Secret", "x"), ("TimeOtp-Period", "0")]).unwrap_err(),
+            native(InvalidPeriod)
+        );
+        assert_eq!(
+            resolve_spec(&[("TimeOtp-Secret-Hex", "zz")]).unwrap_err(),
+            native(InvalidSecret)
+        );
     }
 
     #[test]
@@ -853,8 +1237,6 @@ mod tests {
 
     #[test]
     fn base32_tolerates_nonzero_trailing_bits() {
-        // 26 characters carry 130 bits; the last 2 are padding bits that
-        // some generators leave non-zero. "...Q" and "...R" differ only there.
         let a = decode_base32_secret("GEZDGNBVGY3TQOJQGEZDGNBVGQ").expect("zero trailing bits");
         let b = decode_base32_secret("GEZDGNBVGY3TQOJQGEZDGNBVGR").expect("non-zero trailing bits");
         assert_eq!(a, b);
@@ -886,15 +1268,14 @@ mod tests {
                     ),
                 )
         };
-        let revealed = build(Sealing::Reveal(&key));
-        let cfg = resolve(&revealed).unwrap().expect("configured");
+        let cfg = resolve(&build(Sealing::Reveal(&key)))
+            .unwrap()
+            .expect("configured");
         assert_eq!(cfg.code_at(59).code(), RFC_SHA1_AT_59);
-        let sealed = build(Sealing::Fingerprint(&key));
         assert_eq!(
-            resolve(&sealed).unwrap_err(),
+            resolve(&build(Sealing::Fingerprint(&key))).unwrap_err(),
             OtpError::Sealed(OtpField::Uri)
         );
-        // No OTP fields at all is not an error.
         assert!(resolve(&Entry::new(uuid::Uuid::nil())).unwrap().is_none());
     }
 }

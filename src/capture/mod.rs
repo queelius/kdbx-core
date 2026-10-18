@@ -55,7 +55,7 @@
 //! assert!(mail.field("Password").unwrap().value.is_sealed());
 //!
 //! // OTP still works: read the OTP fields from the live entry.
-//! let config = resolve_fields(&otp_fields(&db.entry(id).unwrap())).unwrap();
+//! let config = resolve_fields(&otp_fields(&db.entry(id).unwrap())).unwrap().unwrap();
 //! assert_eq!(config.code_at(59).code(), "287082");
 //! # }
 //! ```
