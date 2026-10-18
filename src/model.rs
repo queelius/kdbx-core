@@ -401,6 +401,27 @@ pub enum NodeKind {
     Entry,
 }
 
+/// The characters that separate tags in a KDBX `<Tags>` value. KeePass writes
+/// `;`; readers also accept `,` and tab.
+pub const TAG_DELIMITERS: [char; 3] = [';', ',', '\t'];
+
+/// Parse a KDBX tag list: split on [`TAG_DELIMITERS`], trim each tag, and drop
+/// empty ones.
+///
+/// ```
+/// use kdbx_core::model::parse_tags;
+///
+/// let tags = parse_tags("money; finance,,\twork");
+/// assert_eq!(tags.into_iter().collect::<Vec<_>>(), ["finance", "money", "work"]);
+/// ```
+pub fn parse_tags(raw: &str) -> BTreeSet<String> {
+    raw.split(TAG_DELIMITERS)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Constructors and accessors.
 
