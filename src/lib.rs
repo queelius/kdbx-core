@@ -28,3 +28,6 @@ pub mod otp;
 pub mod path;
 pub mod text;
 pub mod visibility;
+
+#[cfg(test)]
+mod serde_contract;

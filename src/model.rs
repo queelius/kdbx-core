@@ -14,7 +14,9 @@
 //! can leak it by mistake. [`Sealing::Reveal`] is the only way plaintext
 //! protected values enter a snapshot.
 //!
-//! The serialized shape (serde) is **unstable before 1.0**.
+//! The serialized names (serde) are a stability contract pinned in
+//! `src/serde_contract.rs`: diff-kdbx's versioned JSON embeds them. Fields may
+//! be added before 1.0; changing an existing name bumps the minor version.
 //!
 //! Every struct here is `#[non_exhaustive]`: build values with the provided
 //! constructors (for example [`Entry::new`], [`Group::new`]) and then set the
@@ -138,6 +140,7 @@ pub enum OuterCipher {
     /// Twofish-CBC.
     Twofish,
     /// ChaCha20.
+    #[serde(rename = "chacha20")]
     ChaCha20,
     /// A cipher the capturing keepass version does not name.
     Unrecognized,
@@ -153,6 +156,7 @@ pub enum InnerCipher {
     /// Salsa20 (KDBX 3.1).
     Salsa20,
     /// ChaCha20 (KDBX 4).
+    #[serde(rename = "chacha20")]
     ChaCha20,
     /// A cipher the capturing keepass version does not name.
     Unrecognized,
@@ -166,6 +170,7 @@ pub enum Compression {
     /// Uncompressed.
     None,
     /// GZip.
+    #[serde(rename = "gzip")]
     GZip,
     /// A compression the capturing keepass version does not name.
     Unrecognized,

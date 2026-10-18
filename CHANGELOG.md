@@ -43,6 +43,12 @@ All notable changes to this crate are documented here. The format follows
 
 ### Changed
 
+- Serialized names are pinned as a contract (`src/serde_contract.rs`);
+  `chacha20` and `gzip` replace the mechanical `cha_cha20` and `g_zip`.
+- `DeriveParams` compares whole Argon2 cost (memory x passes) against the
+  floor instead of taking a per-component maximum; `DeriveParams::cost` and
+  `DeriveParams::stronger` added.
+
 - Smaller WASM: a compact Cc/Cf/Zl/Zp table replaces the
   `unicode-properties` lookup, and built-in hex/base32/base64 decoders replace
   `data-encoding` (both now dev-dependencies only).

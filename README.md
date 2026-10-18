@@ -82,6 +82,19 @@ for entry in snap.entries() {
 Protected values never enter `snap` in plaintext: they are fingerprints, and
 `Debug`, serde and every view built on the snapshot can only show those.
 
+## Serialized forms are a stability contract
+
+diff-kdbx's versioned JSON (`format_version` 1) embeds kdbx-core's serialized
+forms: `Value`'s `plain`/`sealed` tags, fingerprint hex, the `VaultPath` string
+form, the `Timestamp` and `Rgb` text forms, the header enums (`KdfInfo`,
+`Argon2Variant`, `OuterCipher`, `InnerCipher`, `Compression`), `DeriveParams`
+fields, `Icon`, `AutoTypeObfuscation`, `FieldTraits`, the OTP error tags, and
+every struct's field names. They are pinned by `src/serde_contract.rs`.
+Changing any of them is a breaking change for diff-kdbx's JSON: it must bump
+kdbx-core's minor version and be coordinated with diff-kdbx. (The serde shape
+of the whole `Snapshot` is otherwise unstable before 1.0 in the sense that
+fields may be added; existing names do not change silently.)
+
 ## Testing
 
 `tests/corpus/` is a frozen, checksummed conformance corpus (KeePassXC and

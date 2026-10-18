@@ -27,6 +27,10 @@ escaping, TOTP. keepass adapters are optional additive features
   re-implements them.
 - Fingerprints are keyed. Nothing in the crate exposes an unkeyed hash of a
   secret.
+- Serialized names are a cross-crate contract (diff-kdbx's versioned JSON
+  embeds them), pinned in `src/serde_contract.rs`. Changing one is a breaking
+  change: bump the minor version and coordinate with diff-kdbx. A new enum
+  variant or struct field must be pinned there (the tests fail until it is).
 - Default features pull in no keepass.
 - The library does no I/O and reads no clock; it builds for
   `wasm32-unknown-unknown` with `--no-default-features` and with `kdf`.
@@ -47,12 +51,12 @@ MSRV is 1.89 (keepass 0.15 requires it): `cargo +1.89.0 test --all-features`.
 
 ## Tests (as of 0.1.0)
 
-187 with `--all-features`: 142 unit (text incl. the exhaustive escape-table
+197 with `--all-features`: 152 unit (text incl. the exhaustive escape-table
 check, codec, fields, fingerprint incl. 6 `kdf` tests, model, visibility,
-path incl. property tests and the PathIndex bulk test, otp), 8 + 8 capture
+path incl. property tests and the PathIndex bulk test, otp, serde contract), 8 + 8 capture
 integration tests (`tests/capture_keepass_0_12.rs`,
 `tests/capture_keepass_0_15.rs`, shared fixture in `tests/common/mod.rs`), 18
-corpus tests (`tests/corpus.rs`), 11 doc tests. `--no-default-features`: 136
+corpus tests (`tests/corpus.rs`), 11 doc tests. `--no-default-features`: 146
 unit, 3 corpus tests (checksums, manifest, license), 11 doc tests.
 
 Keep the library free of general-purpose tables (WASM size): escaping uses
