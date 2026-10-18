@@ -44,6 +44,7 @@ use std::sync::LazyLock;
 use data_encoding::{BASE64, Encoding, HEXLOWER_PERMISSIVE, Specification};
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use zeroize::Zeroizing;
@@ -112,6 +113,21 @@ impl OtpField {
     /// The OTP field stored under `name`, if any (exact match).
     pub fn from_kdbx_name(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|f| f.kdbx_name() == name)
+    }
+}
+
+/// Serializes as the KDBX field name.
+impl Serialize for OtpField {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.kdbx_name())
+    }
+}
+
+impl<'de> Deserialize<'de> for OtpField {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        OtpField::from_kdbx_name(&name)
+            .ok_or_else(|| serde::de::Error::custom(format!("'{name}' is not an OTP field")))
     }
 }
 
@@ -205,20 +221,23 @@ impl TotpEncoding {
 }
 
 /// Which of the three encodings an OTP configuration came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
+#[serde(rename_all = "snake_case")]
 pub enum OtpSource {
     /// The `otp` field's `otpauth://` URI.
     Uri,
     /// KeePass 2's `TimeOtp-*` fields.
+    #[serde(rename = "keepass_native")]
     KeePassNative,
     /// The legacy `TOTP Seed` / `TOTP Settings` pair.
     Legacy,
 }
 
 /// Why an OTP source that is present could not be used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
+#[serde(rename_all = "snake_case")]
 pub enum MalformedReason {
     /// Not an `otpauth://` URI.
     NotAnOtpauthUri,
@@ -265,8 +284,9 @@ pub struct TotpCode {
 }
 
 /// Why an entry's TOTP configuration could not be read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
+#[serde(rename_all = "snake_case")]
 pub enum OtpError {
     /// An OTP field is sealed in the snapshot, so its plaintext is not
     /// available. Resolve from the live entry's `otp_fields` instead, or
@@ -305,13 +325,23 @@ impl fmt::Display for OtpError {
         match self {
             OtpError::Sealed(field) => write!(f, "OTP field '{field}' is sealed in this snapshot"),
             OtpError::Malformed { source, reason } => {
-                write!(f, "malformed OTP configuration ({source:?}): {reason}")
+                write!(f, "malformed OTP configuration ({source}): {reason}")
             }
         }
     }
 }
 
 impl std::error::Error for OtpError {}
+
+impl fmt::Display for OtpSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            OtpSource::Uri => "otpauth URI",
+            OtpSource::KeePassNative => "KeePass TimeOtp fields",
+            OtpSource::Legacy => "legacy TOTP Seed/Settings",
+        })
+    }
+}
 
 /// The TOTP configuration of a snapshot entry: `Ok(None)` when it has none,
 /// an error when an OTP field is sealed or the configuration is malformed.
@@ -762,6 +792,42 @@ mod tests {
         assert_eq!(OtpField::Uri.kdbx_name(), keepass_0_15::db::fields::OTP);
         assert_eq!(OtpField::from_kdbx_name("Password"), None);
         assert_eq!(OtpField::from_kdbx_name("OTP"), None);
+    }
+
+    #[test]
+    fn errors_display_human_readably_and_serialize_with_snake_case_tags() {
+        let err = OtpError::Malformed {
+            source: OtpSource::KeePassNative,
+            reason: MalformedReason::UnknownAlgorithm,
+        };
+        assert_eq!(
+            err.to_string(),
+            "malformed OTP configuration (KeePass TimeOtp fields): unknown algorithm"
+        );
+        assert_eq!(OtpSource::Uri.to_string(), "otpauth URI");
+        assert_eq!(OtpSource::Legacy.to_string(), "legacy TOTP Seed/Settings");
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"malformed":{"source":"keepass_native","reason":"unknown_algorithm"}}"#
+        );
+        let missing = OtpError::Malformed {
+            source: OtpSource::Legacy,
+            reason: MalformedReason::MissingField(OtpField::LegacySettings),
+        };
+        assert_eq!(
+            serde_json::to_string(&missing).unwrap(),
+            r#"{"malformed":{"source":"legacy","reason":{"missing_field":"TOTP Settings"}}}"#
+        );
+        let sealed = OtpError::Sealed(OtpField::Uri);
+        assert_eq!(
+            serde_json::to_string(&sealed).unwrap(),
+            r#"{"sealed":"otp"}"#
+        );
+        for e in [err, missing, sealed] {
+            let back: OtpError = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+            assert_eq!(back, e);
+        }
+        assert!(serde_json::from_str::<OtpField>(r#""Password""#).is_err());
     }
 
     #[test]
