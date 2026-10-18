@@ -61,7 +61,7 @@ use kdbx_core::visibility::metadata_value;
 let db: keepass_0_15::Database = open_somehow();
 
 // A key stable across processes (feature `kdf`), salted with the root UUID,
-// never cheaper to attack than the vault's own KDF. Record `params` next to
+// never cheaper to attack (memory x passes) than the vault's own KDF. Record `params` next to
 // any fingerprint you publish: a verifier needs them.
 let params = DeriveParams::for_header(Some(&header(&db)));
 let key = FingerprintKey::derive(

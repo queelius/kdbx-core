@@ -19,8 +19,10 @@ escaping, TOTP. keepass adapters are optional additive features
 - One secret predicate, `visibility::is_secret` (protected or a Password,
   never the Title), drives both sealing and visibility.
 - Title is an address, never a secret (spec 3.1).
-- Fingerprint key derivation never runs below the vault's own Argon2
-  parameters nor the 64 MiB / 3 / 1 floor (`DeriveParams`).
+- Fingerprint key derivation never costs less (memory x passes) than the
+  vault's own Argon2 KDF nor the 64 MiB x 3 floor: `DeriveParams` uses the
+  vault's parameters exactly when they cost at least the floor, else the floor
+  (never a per-component max).
 - One visibility rule, one path grammar, one escape function: no member
   re-implements them.
 - Fingerprints are keyed. Nothing in the crate exposes an unkeyed hash of a

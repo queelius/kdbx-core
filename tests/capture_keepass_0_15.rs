@@ -77,12 +77,10 @@ fn header_alone_matches_the_captured_header_and_sets_derive_params() {
         DeriveParams::FLOOR
     );
     assert_eq!(DeriveParams::for_snapshot(&snap), DeriveParams::FLOOR);
-    // keepass's default config is Argon2d, 1 MiB, 50 passes, 4 lanes.
+    // keepass's default config is Argon2d, 1 MiB, 50 passes, 4 lanes: cheaper
+    // than the floor, so the floor.
     let params = DeriveParams::for_header(Some(&header(&kp::Database::new())));
-    assert_eq!(
-        (params.memory_kib(), params.iterations(), params.lanes()),
-        (65_536, 50, 4)
-    );
+    assert_eq!(params, DeriveParams::FLOOR);
 }
 
 #[test]

@@ -20,11 +20,12 @@
 //!   within one process (a stage diff). Costs nothing.
 //! - `FingerprintKey::derive` (feature `kdf`), an Argon2id derivation from the
 //!   vault's key material, when fingerprints must be stable across processes
-//!   (git textconv, verifiable audit logs). Its [`DeriveParams`] are, per
-//!   component, the maximum of a 64 MiB / 3 passes / 1 lane floor and the
-//!   vault's own Argon2 parameters ([`DeriveParams::for_snapshot`]), so
-//!   breaking such a fingerprint costs at least as much as attacking the vault
-//!   through its own KDF (for an AES-KDF vault, at least the Argon2id floor).
+//!   (git textconv, verifiable audit logs). Its [`DeriveParams`] are the
+//!   vault's own Argon2 parameters when they cost (memory x passes) at least
+//!   as much as a 64 MiB / 3 passes / 1 lane floor, and the floor otherwise
+//!   ([`DeriveParams::for_snapshot`]), so breaking such a fingerprint costs at
+//!   least as much as attacking the vault through its own KDF (for an AES-KDF
+//!   vault, at least the Argon2id floor).
 //!
 //! ```
 //! use kdbx_core::fingerprint::{Domain, FingerprintKey};
@@ -259,10 +260,11 @@ pub const DERIVE_SALT_PREFIX: &[u8] = b"kdbx-core/fingerprint/v1";
 
 /// The Argon2id parameters of a fingerprint key derivation.
 ///
-/// Never below [`DeriveParams::FLOOR`] (64 MiB, 3 passes, 1 lane) in any
-/// component, and, via [`DeriveParams::for_snapshot`], never below the vault's
-/// own Argon2 parameters, so a fingerprint is never a cheaper oracle on the
-/// master password than the vault itself.
+/// Never cheaper ([`DeriveParams::cost`]: memory x passes) than
+/// [`DeriveParams::FLOOR`] (64 MiB, 3 passes, 1 lane), and, via
+/// [`DeriveParams::for_snapshot`], never cheaper than the vault's own Argon2
+/// KDF, so a fingerprint is never a cheaper oracle on the master password than
+/// the vault itself, nor needlessly costlier.
 ///
 /// The parameters are part of what a verifier must reproduce: record them
 /// next to the fingerprints (`Display` gives a PHC-style string, serde a
@@ -272,7 +274,9 @@ pub const DERIVE_SALT_PREFIX: &[u8] = b"kdbx-core/fingerprint/v1";
 /// use kdbx_core::fingerprint::DeriveParams;
 ///
 /// let p = DeriveParams::new(1 << 20, 2, 4);
-/// assert_eq!(p.to_string(), "argon2id$v=19$m=1048576,t=3,p=4");
+/// assert_eq!(p.to_string(), "argon2id$v=19$m=1048576,t=2,p=4");
+/// // Cheaper than the floor: the floor.
+/// assert_eq!(DeriveParams::new(1024, 50, 4), DeriveParams::FLOOR);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "DeriveParamsRepr", into = "DeriveParamsRepr")]
@@ -300,18 +304,31 @@ impl DeriveParams {
         lanes: 1,
     };
 
-    /// Parameters with each component raised to at least the floor.
+    /// These parameters if they cost at least as much as the floor
+    /// ([`DeriveParams::cost`]), otherwise the floor. A lane count of 0 is
+    /// raised to 1.
     pub fn new(memory_kib: u32, iterations: u32, lanes: u32) -> Self {
-        DeriveParams {
-            memory_kib: memory_kib.max(Self::FLOOR.memory_kib),
-            iterations: iterations.max(Self::FLOOR.iterations),
-            lanes: lanes.max(Self::FLOOR.lanes),
+        let candidate = DeriveParams {
+            memory_kib,
+            iterations,
+            lanes: lanes.max(1),
+        };
+        if candidate.cost() >= Self::FLOOR.cost() {
+            candidate
+        } else {
+            Self::FLOOR
         }
     }
 
-    /// The parameters for a vault using `kdf`: per component, the maximum of
-    /// the floor and the vault's Argon2 parameters (always run as Argon2id).
-    /// AES-KDF and unrecognized KDFs get the floor.
+    /// The parameters for a vault using `kdf`: the vault's own Argon2
+    /// memory, passes and lanes, exactly (always run as Argon2id), when they
+    /// cost at least as much as the floor; otherwise the floor. AES-KDF and
+    /// unrecognized KDFs get the floor.
+    ///
+    /// Taking the cost (memory x passes) as a whole, rather than a maximum per
+    /// component, keeps derivation as costly as the stronger of the two and
+    /// no costlier: maxing keepass's default (1 MiB, 50 passes, 4 lanes) with
+    /// the floor per component would have run 64 MiB x 50 passes x 4 lanes.
     pub fn for_kdf(kdf: &KdfInfo) -> Self {
         match kdf {
             KdfInfo::Argon2(a) => {
@@ -323,6 +340,25 @@ impl DeriveParams {
                 )
             }
             KdfInfo::Aes { .. } | KdfInfo::Unrecognized => Self::FLOOR,
+        }
+    }
+
+    /// The attack cost Argon2 imposes, as memory (KiB) times passes. Lanes
+    /// change wall-clock time on parallel hardware, not the work an attacker
+    /// must do per guess.
+    pub fn cost(&self) -> u64 {
+        u64::from(self.memory_kib) * u64::from(self.iterations)
+    }
+
+    /// The costlier of `self` and `other`; on equal cost, the one with more
+    /// memory, then more passes, then more lanes. Symmetric and deterministic,
+    /// for choosing one key derivation when comparing two vaults.
+    pub fn stronger(self, other: DeriveParams) -> DeriveParams {
+        let key = |p: &DeriveParams| (p.cost(), p.memory_kib, p.iterations, p.lanes);
+        if key(&other) > key(&self) {
+            other
+        } else {
+            self
         }
     }
 
@@ -363,7 +399,8 @@ impl fmt::Display for DeriveParams {
     }
 }
 
-/// The error of deserializing [`DeriveParams`] below the floor.
+/// The error of deserializing [`DeriveParams`] cheaper than the floor (or with
+/// zero lanes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BelowFloorError;
 
@@ -680,16 +717,23 @@ mod tests {
         }
 
         #[test]
-        fn params_are_the_per_component_max_of_floor_and_vault() {
+        fn vault_params_are_used_exactly_when_at_least_as_costly_as_the_floor() {
+            // cost = memory KiB x passes; the floor costs 65,536 x 3 = 196,608.
             let cases = [
                 // No header, AES-KDF, or an unknown KDF: the floor.
                 (None, (65_536, 3, 1)),
                 (Some(KdfInfo::Aes { rounds: 60_000 }), (65_536, 3, 1)),
                 (Some(KdfInfo::Unrecognized), (65_536, 3, 1)),
-                // keepass's default Argon2d: 1 MiB, 50 passes, 4 lanes.
-                (Some(argon2(1 << 20, 50, 4)), (65_536, 50, 4)),
-                // A memory-heavy vault: 256 MiB, 2 passes.
-                (Some(argon2(256 << 20, 2, 1)), (262_144, 3, 1)),
+                // keepass's default Argon2d (1 MiB, 50 passes, 4 lanes) costs
+                // 1,024 x 50 = 51,200 < 196,608: the floor, not a 64 MiB x 50
+                // x 4 hybrid costlier than both.
+                (Some(argon2(1 << 20, 50, 4)), (65_536, 3, 1)),
+                // KeePassXC's default (64 MiB, 10 passes, 2 lanes): exactly its own.
+                (Some(argon2(64 << 20, 10, 2)), (65_536, 10, 2)),
+                // Memory-heavy, few passes, still costlier: exactly its own.
+                (Some(argon2(256 << 20, 1, 1)), (262_144, 1, 1)),
+                // Exactly the floor's cost with other parameters: its own.
+                (Some(argon2(32 << 20, 6, 1)), (32_768, 6, 1)),
                 // Odd byte counts round up to whole KiB.
                 (Some(argon2((128 << 20) + 1, 3, 1)), (131_073, 3, 1)),
             ];
@@ -708,9 +752,30 @@ mod tests {
         }
 
         #[test]
-        fn new_raises_each_component_to_the_floor() {
+        fn new_keeps_params_at_least_as_costly_as_the_floor() {
             assert_eq!(triple(DeriveParams::new(1, 1, 0)), (65_536, 3, 1));
-            assert_eq!(triple(DeriveParams::new(1 << 20, 2, 8)), (1 << 20, 3, 8));
+            assert_eq!(triple(DeriveParams::new(1 << 20, 2, 8)), (1 << 20, 2, 8));
+            assert_eq!(triple(DeriveParams::new(1 << 20, 2, 0)), (1 << 20, 2, 1));
+            assert_eq!(DeriveParams::FLOOR.cost(), 196_608);
+        }
+
+        #[test]
+        fn stronger_picks_the_costlier_deterministically() {
+            let floor = DeriveParams::FLOOR;
+            let heavy = DeriveParams::new(1 << 20, 3, 4);
+            assert_eq!(floor.stronger(heavy), heavy);
+            assert_eq!(heavy.stronger(floor), heavy);
+            // Equal cost: more memory wins, then more passes, then more lanes.
+            let mem = DeriveParams::new(131_072, 3, 1);
+            let passes = DeriveParams::new(65_536, 6, 1);
+            assert_eq!(mem.cost(), passes.cost());
+            assert_eq!(mem.stronger(passes), mem);
+            assert_eq!(passes.stronger(mem), mem);
+            let one_lane = DeriveParams::new(65_536, 6, 1);
+            let four_lanes = DeriveParams::new(65_536, 6, 4);
+            assert_eq!(one_lane.stronger(four_lanes), four_lanes);
+            assert_eq!(four_lanes.stronger(one_lane), four_lanes);
+            assert_eq!(floor.stronger(floor), floor);
         }
 
         #[test]
@@ -814,7 +879,8 @@ mod tests {
             let floor = DeriveParams::FLOOR;
             let a = FingerprintKey::derive(&material, SALT, &floor).unwrap();
             let b = FingerprintKey::derive(&material, Uuid::from_u128(2), &floor).unwrap();
-            let c = FingerprintKey::derive(&material, SALT, &DeriveParams::new(0, 4, 1)).unwrap();
+            let c =
+                FingerprintKey::derive(&material, SALT, &DeriveParams::new(65_536, 4, 1)).unwrap();
             assert_ne!(key_bytes(&a), key_bytes(&b));
             assert_ne!(key_bytes(&a), key_bytes(&c));
         }
@@ -831,7 +897,7 @@ mod tests {
         #[test]
         fn derive_reports_parameters_argon2_rejects() {
             // More lanes than Argon2 allows.
-            let params = DeriveParams::new(0, 0, u32::MAX);
+            let params = DeriveParams::new(65_536, 3, u32::MAX);
             assert_eq!(
                 FingerprintKey::derive(&KeyMaterial::new(Some(b"pw"), None), SALT, &params)
                     .unwrap_err(),
