@@ -305,7 +305,7 @@ slightly wrong.
 
 1. **`Sealing::Reveal` carries the key**: `enum Sealing<'k> { Fingerprint(&'k FingerprintKey), Reveal(&'k FingerprintKey) }`. Attachments, binary custom-data values and custom icons are never inlined, so they are fingerprinted under either variant; a unit `Reveal` would have forced either an unkeyed hash (breaking the "fingerprints are keyed" invariant) or inlined bytes. diff-kdbx's `--show-secrets` derives a key anyway.
 2. **Binary custom data stays sealed under `Reveal`**; only text values are revealed. A custom-data item with no value element is captured as an empty string.
-3. **`Sealing` owns the sealing rule** (`field`, `custom_text`, `custom_binary`, `attachment`, `custom_icon`), so every adapter, present or future, applies it identically. The Title exception is `visibility::is_address`, shared with `metadata_value`.
+3. **`Sealing` owns the sealing rule** (`field`, `custom_text`, `custom_binary`, `attachment`, `custom_icon`), so every adapter, present or future, applies it identically. The secret rule is `visibility::is_secret`, shared with `metadata_value` (see 26).
 4. **Fourth fingerprint domain** `kdbx-core/custom-icon/v1`, for `Meta::custom_icons: BTreeMap<Uuid, CustomIconInfo { size, fingerprint, name, modified }>`.
 5. **`Snapshot::deleted_objects`** (the `<DeletedObjects>` tombstones) is part of the image. `Meta` also keeps `generator`, `last_selected_group` and `last_top_visible_group` for fidelity; consumers decide what is noise.
 6. **Faithful optionality**: the seven `Times` values stay `Option` (KDBX can omit them); `quality_check` is a `bool` (absent means on); `Icon::Standard(u32)` saturates the (never seen) out-of-range index.
@@ -316,7 +316,7 @@ slightly wrong.
 **Fingerprints (3.5)**
 
 10. **Exact bytes, no NFC**: field fingerprints cover the stored UTF-8 bytes (diff-kdbx 0.2 NFC-normalized first). For a secret, equality must mean byte equality.
-11. **`derive` refuses empty key material** (`KdfError::NoKeyMaterial`): a key derived from no secret would reopen the dictionary oracle. The key file contributes `SHA-256` of its raw bytes. The parameters are public in `fingerprint::kdf_params`; known answers are cross-checked against Python's `hmac` and against rust-argon2.
+11. **`derive` refuses empty key material** (`KdfError::NoKeyMaterial`): a key derived from no secret would reopen the dictionary oracle. The key file contributes `SHA-256` of its raw bytes. The parameters are `fingerprint::DeriveParams` (see 24); known answers are cross-checked against Python's `hmac` and against rust-argon2.
 12. `Fingerprint` displays its 8-character short form, parses and serializes the 64-character form, and has a public `from_bytes` (so a logged fingerprint can be verified).
 
 **Paths (3.4)**
@@ -332,8 +332,8 @@ slightly wrong.
 
 **OTP (3.7)**
 
-18. **Typed OTP fields**: `otp::OtpField` names the ten OTP-related fields; `capture::*::otp_fields` returns `OtpFields` (a `BTreeMap<OtpField, Zeroizing<String>>` with redacting `Debug`) instead of a `BTreeMap<String, String>`. `resolve(&Entry) -> Result<Option<TotpConfig>, OtpError>` fails with `OtpError::Sealed(field)` rather than guessing; `resolve_fields(&OtpFields)` serves the live-entry path.
-19. **Stricter URIs**: a malformed `period` or `digits` rejects the otpauth URI (mcp-kdbx silently used the default, computing a wrong code). Scheme and type compare case-insensitively; base32 tolerates non-zero trailing bits.
+18. **Typed OTP fields**: `otp::OtpField` names the ten OTP-related fields; `capture::*::otp_fields` returns `OtpFields` (a `BTreeMap<OtpField, Zeroizing<String>>` with redacting `Debug`) instead of a `BTreeMap<String, String>`. `resolve(&Entry) -> Result<Option<TotpConfig>, OtpError>` fails with `OtpError::Sealed(field)` rather than guessing; `resolve_fields(&OtpFields)` serves the live-entry path (both return typed malformed errors, see 28).
+19. **Stricter URIs**: a malformed `period` or `digits` rejects the otpauth URI (mcp-kdbx silently used the default, computing a wrong code), and so does an unknown `algorithm` or `encoder` (see 28). Scheme and type compare case-insensitively; base32 tolerates non-zero trailing bits.
 20. **Leaner dependencies than mcp-kdbx**: RFC 6238 over `hmac` with `sha1`/`sha2` (no totp-lite), `data-encoding` for base32/base64/hex, and an RFC 3986 split plus `form_urlencoded` for the URI (no `url`, whose IDNA tables would land in WASM). `compute_now`/`unix_now` are gone (no clock); `evaluation_time` stays.
 
 **Capture (3.8) and corpus (6)**
@@ -341,6 +341,20 @@ slightly wrong.
 21. keepass 0.12 keeps children in a randomized hash set, so its adapter sorts children by UUID (document order is unrecoverable); keepass 0.15 keeps document order.
 22. keepass 0.12 cannot pin UUIDs, so `examples/gen_corpus.rs` builds the vault with keepass 0.15 and fixed UUIDs and has keepass 0.12 re-save it as KDBX 4.0. `tests/corpus/manifest.json` is the typed record the tests read; `MANIFEST.md` is its human-readable twin (the tests check that it mentions every file and checksum).
 23. Both keepass versions are dev-dependencies (with `save_kdbx4`), so tests build keepass even under `--no-default-features`; library users never see them.
+
+**Review follow-up (owner decisions, 2026-10-18)**
+
+24. **KDF floor**: `FingerprintKey::derive(material, salt, &DeriveParams)`. `DeriveParams` is, per component (memory, passes, lanes), the maximum of the floor (64 MiB, 3, 1) and the vault's own Argon2 parameters, always run as Argon2id; AES-KDF and unrecognized KDFs get the floor. So a fingerprint is never a cheaper oracle on the master password than the vault's own KDF. `DeriveParams::{for_kdf, for_header, for_snapshot}` compute it; `capture::*::header(&Database)` provides the header before a key (and so a capture) exists. The parameters are part of what a verifier must reproduce: record them next to fingerprints (`Display`: `argon2id$v=19$m=..,t=..,p=..`; serde: a struct that refuses values below the floor). Known answers are pinned for two parameter sets. The earlier claim that the fixed parameters matched KeePassXC defaults is withdrawn.
+25. **Header capture**: `Snapshot::header: Option<HeaderInfo>` records the KDF and its parameters (`KdfInfo`), outer cipher, inner stream cipher, compression, and public-custom-data keys. diff-kdbx reports changes here (KDF downgrades). keepass marks the corresponding enums `#[non_exhaustive]`, so a variant it adds later maps to `Unrecognized`.
+26. **One secret predicate**: `visibility::is_secret(name, protected) = name != Title && (protected || traits_of(name).protected_by_default)`, used by both `Sealing::field` and `metadata_value`, so sealing and visibility cannot disagree. A Password whose protection flag is off is sealed and hidden (old diff-kdbx always masked the Password). `Entry`'s `Debug` redacts secret plaintext by this rule (a bare `Field` redacts protected plaintext), so a `Reveal` snapshot does not print secrets via `Debug`.
+27. **Bulk paths**: `path::PathIndex` computes every node's path in one pass (each name NFC-normalized once, ordinals per sibling list); `path_of` is the single-lookup convenience and shares the same sibling computation, so the two agree by construction (first node in walk order wins for duplicate UUIDs).
+28. **OTP errors and Steam**: `resolve_fields` returns `Result<Option<TotpConfig>, OtpError>`; `Ok(None)` means no source is present (empty fields count as absent), `OtpError::Malformed { source: OtpSource, reason: MalformedReason }` means sources are present but none is usable. A malformed source still falls through to a later well-formed one. Unknown algorithms and encoders are rejected. `TotpEncoding::Steam` implements KeePassXC's `encoder=steam` and the legacy `S` digits (five characters of `23456789BCDFGHJKMNPQRTVWXY` from the RFC 4226 truncated value, least significant first; the vectors were computed independently with Python, not taken from KeePassXC itself). A legacy `TOTP Seed` without `TOTP Settings` is reported as `MissingField` rather than defaulted.
+29. **Canonical paths**: `Segment::new` stores the NFC name and treats ordinal 1 as none, so paths that resolve alike compare equal and format identically; `path_of` writes the first of several same-named siblings bare (`/Web/Dup`, then `/Web/Dup:2`). `parse` accepts some non-canonical spellings; `format` emits the canonical one.
+30. **Constants as slices**: `Domain::ALL` and `OtpField::ALL` are `&'static [T]` (an array length on a `#[non_exhaustive]` enum is a semver hazard); `StandardField::ALL` stays an array (a format constant).
+31. **Zeroization in derive**: the input is hashed straight into a wiped buffer, and the output and Argon2 working memory are wiped (`Zeroizing`). The SHA-256 hasher state cannot be wiped (sha2 0.10 has no zeroization). `FingerprintKey::from_bytes` takes its array by value; the caller wipes its own source.
+32. **Auto-type sequences stay plain** under either sealing: KDBX does not protect them, and they are user-authored macros that reference fields by placeholder.
+33. **Upstream gaps (keepass keeps the data crate-private; accessor requests for keepass-rs)**: `previous_parent` is read through keepass's `previous_parent()` lookup, which returns `None` when the old parent group no longer exists, so a deleted previous parent's UUID is lost; a group's `LastTopVisibleEntry` is not capturable at all.
+34. **Packaging**: the keepass-rs MIT license text ships as `tests/corpus/LICENSE-keepass-rs` and is referenced from the manifest; the package excludes `docs/superpowers/` and `proptest-regressions/`; CI runs `cargo publish --dry-run`.
 
 **keepass 0.12 limitations found (pinned by tests)**
 

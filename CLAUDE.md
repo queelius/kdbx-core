@@ -15,8 +15,12 @@ escaping, TOTP. keepass adapters are optional additive features
 
 ## Invariants (do not break)
 
-- Plaintext of a protected value enters a snapshot only under `Sealing::Reveal`.
+- Plaintext of a secret value enters a snapshot only under `Sealing::Reveal`.
+- One secret predicate, `visibility::is_secret` (protected or a Password,
+  never the Title), drives both sealing and visibility.
 - Title is an address, never a secret (spec 3.1).
+- Fingerprint key derivation never runs below the vault's own Argon2
+  parameters nor the 64 MiB / 3 / 1 floor (`DeriveParams`).
 - One visibility rule, one path grammar, one escape function: no member
   re-implements them.
 - Fingerprints are keyed. Nothing in the crate exposes an unkeyed hash of a
@@ -41,12 +45,12 @@ MSRV is 1.89 (keepass 0.15 requires it): `cargo +1.89.0 test --all-features`.
 
 ## Tests (as of 0.1.0)
 
-153 with `--all-features`: 114 unit (text, fields, fingerprint incl. 4 `kdf`
-tests, model, visibility, path incl. property tests, otp), 8 + 7 capture
-integration tests (`tests/capture_keepass_0_12.rs`, `tests/capture_keepass_0_15.rs`,
-shared fixture in `tests/common/mod.rs`), 15 corpus tests (`tests/corpus.rs`),
-9 doc tests. `--no-default-features`: 110 unit, 2 corpus checksum tests, 9 doc
-tests.
+177 with `--all-features`: 132 unit (text, fields, fingerprint incl. 6 `kdf`
+tests, model, visibility, path incl. property tests and the PathIndex bulk
+test, otp), 8 + 8 capture integration tests (`tests/capture_keepass_0_12.rs`,
+`tests/capture_keepass_0_15.rs`, shared fixture in `tests/common/mod.rs`), 18
+corpus tests (`tests/corpus.rs`), 11 doc tests. `--no-default-features`: 126
+unit, 3 corpus tests (checksums, manifest, license), 11 doc tests.
 
 The corpus (`tests/corpus/`) is bytes only: never edit a file in place.
 `manifest.json` is the typed record the tests read; keep `MANIFEST.md` in step

@@ -42,12 +42,12 @@ The library performs no I/O, reads no clock, and builds for
 |---|---|
 | `model` | `Snapshot`: an owned, serializable, keepass-free image of a database, sealed at capture (`Sealing::Fingerprint` or `Sealing::Reveal`) |
 | `fields` | `StandardField`: the five KDBX standard fields and their traits |
-| `visibility` | `metadata_value`: the one rule for which values may leave the vault (protected values hidden, the Title always visible) |
-| `path` | `VaultPath`: the one path grammar (`/Group/Entry:2`, `/Group/`), parse, format, resolve, `path_of` |
-| `fingerprint` | `FingerprintKey`, `Fingerprint`: keyed HMAC-SHA256 fingerprints; Argon2id-derived stable keys (`kdf`) |
+| `visibility` | `is_secret`, `metadata_value`: the one rule for which values are secrets (protected or a Password, never the Title) |
+| `path` | `VaultPath`: the one path grammar (`/Group/Entry:2`, `/Group/`), parse, format, resolve; `path_of` and `PathIndex` |
+| `fingerprint` | `FingerprintKey`, `Fingerprint`: keyed HMAC-SHA256 fingerprints; Argon2id-derived stable keys (`kdf`) with `DeriveParams` never below the vault's KDF |
 | `text` | `escape_inline`, `continuation_lines`: rendering that no value can break out of |
-| `otp` | `resolve`, `TotpConfig::code_at`: TOTP from otpauth URIs, KeePass 2 `TimeOtp-*` fields, or the legacy pair |
-| `capture` | `keepass_0_12::capture`, `keepass_0_15::capture`, `otp_fields` |
+| `otp` | `resolve`, `TotpConfig::code_at`: TOTP (decimal or Steam) from otpauth URIs, KeePass 2 `TimeOtp-*` fields, or the legacy pair |
+| `capture` | `keepass_0_12::{capture, header, otp_fields}`, `keepass_0_15::{capture, header, otp_fields}` |
 
 ## Example
 
@@ -55,7 +55,7 @@ The library performs no I/O, reads no clock, and builds for
 use kdbx_core::capture::keepass_0_15::{capture, header};
 use kdbx_core::fingerprint::{DeriveParams, FingerprintKey, KeyMaterial};
 use kdbx_core::model::Sealing;
-use kdbx_core::path::path_of;
+use kdbx_core::path::PathIndex;
 use kdbx_core::visibility::metadata_value;
 
 let db: keepass_0_15::Database = open_somehow();
@@ -71,8 +71,9 @@ let key = FingerprintKey::derive(
 )?;
 let snap = capture(&db, &Sealing::Fingerprint(&key));
 
+let paths = PathIndex::new(&snap);
 for entry in snap.entries() {
-    let path = path_of(&snap, entry.uuid).map(|p| p.format());
+    let path = paths.get(entry.uuid).map(|p| p.format());
     let user = metadata_value(entry, "UserName"); // None when protected
     println!("{path:?} {user:?}");
 }

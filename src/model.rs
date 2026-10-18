@@ -296,6 +296,9 @@ pub struct MemoryProtection {
 }
 
 /// A group (folder) and its subtree.
+///
+/// KDBX's `LastTopVisibleEntry` (UI scroll state) is not captured: keepass
+/// keeps it crate-private.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Group {
@@ -316,7 +319,9 @@ pub struct Group {
     /// Behavior flags.
     pub flags: GroupFlags,
     /// The group this one was moved out of (KDBX 4.1; `None` when captured
-    /// from keepass 0.12).
+    /// from keepass 0.12). Also `None` when that group no longer exists:
+    /// keepass only exposes the previous parent through a lookup that fails
+    /// for a deleted group (the raw UUID is crate-private upstream).
     pub previous_parent: Option<Uuid>,
     /// Child groups, in document order.
     pub groups: Vec<Group>,
@@ -371,7 +376,8 @@ pub struct Entry {
     /// Entry custom data (values sealed under [`Sealing::Fingerprint`]).
     pub custom_data: BTreeMap<String, CustomValue>,
     /// The group this entry was moved out of (KDBX 4.1; `None` when captured
-    /// from keepass 0.12).
+    /// from keepass 0.12). Also `None` when that group no longer exists (see
+    /// [`Group::previous_parent`]).
     pub previous_parent: Option<Uuid>,
     /// Earlier versions of this entry, in document order. History items have
     /// empty history.
@@ -488,6 +494,12 @@ pub struct Rgb {
 }
 
 /// Auto-type settings of an entry.
+///
+/// Sequences are always captured in plaintext, under either sealing: KDBX
+/// does not protect them, and they are user-authored keystroke macros that
+/// reference fields by placeholder (`{PASSWORD}`) rather than holding values.
+/// A user who types a literal secret into a sequence has stored it
+/// unprotected in the vault.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AutoType {

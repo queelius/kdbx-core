@@ -27,6 +27,14 @@
 //! | auto-type obfuscation | `Option<bool>` | enum |
 //! | custom icon name and time | not supported: `None` | captured |
 //!
+//! Gaps in both versions, because keepass keeps the data crate-private
+//! (candidates for upstream accessors):
+//!
+//! - `previous_parent` comes from keepass's `previous_parent()`, a lookup
+//!   that returns `None` when the old parent group no longer exists, so the
+//!   UUID of a deleted previous parent is lost.
+//! - A group's `LastTopVisibleEntry` (UI state) is not exposed at all.
+//!
 //! Default features pull in no keepass.
 //!
 //! ```

@@ -28,4 +28,12 @@ All notable changes to this crate are documented here. The format follows
 - `capture`: `keepass_0_12` and `keepass_0_15` adapters (features
   `keepass-0_12`, `keepass-0_15`) with `capture` and `otp_fields`.
 - A frozen, checksummed conformance corpus under `tests/corpus/` and its
-  generator, `examples/gen_corpus.rs`.
+  generator, `examples/gen_corpus.rs`, shipped with the keepass-rs license.
+- `model::HeaderInfo` (KDF, ciphers, compression) captured into
+  `Snapshot::header`; `capture::*::header`.
+- `fingerprint::DeriveParams`: derivation parameters never below the vault's
+  own Argon2 parameters nor a 64 MiB / 3 / 1 floor.
+- `visibility::is_secret`, the one predicate behind sealing and visibility
+  (an unprotected Password is still a secret).
+- `path::PathIndex` for computing every path in one pass.
+- Steam Guard TOTP codes and typed `OtpError::Malformed` errors.
