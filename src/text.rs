@@ -10,6 +10,11 @@
 //!   value line, each starting with a fixed caller-chosen prefix, so git still
 //!   diffs the value line by line and no value line can begin like a
 //!   structural line.
+//! - Vault-controlled text that sits next to renderer syntax on the same line
+//!   (a custom field name used as a label, a plain value that could imitate a
+//!   marker such as `<sealed:...>`) uses [`quote`]: a double-quoted, escaped
+//!   string whose extent is unambiguous, so no content can pose as a
+//!   different label or marker. [`unquote`] reverses it exactly.
 //!
 //! # Escapes
 //!
@@ -160,7 +165,64 @@ pub fn unescape_inline(s: &str) -> Result<Cow<'_, str>, UnescapeError> {
     Ok(Cow::Owned(out))
 }
 
-/// Why [`unescape_inline`] rejected its input.
+/// Render `s` as one double-quoted, escaped token.
+///
+/// The body uses the [`escape_inline`] escapes plus `\"` for a double quote,
+/// so the token's end is unambiguous and nothing inside it can imitate
+/// renderer syntax around it. [`unquote`] is the exact inverse.
+///
+/// ```
+/// use kdbx_core::text::{quote, unquote};
+///
+/// assert_eq!(quote("Tag[x]"), r#""Tag[x]""#);
+/// assert_eq!(quote("say \"hi\"\n"), r#""say \"hi\"\n""#);
+/// assert_eq!(unquote(&quote("a\"b\\c")).unwrap(), "a\"b\\c");
+/// ```
+pub fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        if c == '"' {
+            out.push_str("\\\"");
+        } else {
+            push_escaped(c, &mut out);
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Reverse [`quote`].
+///
+/// Fails when the input is not wrapped in double quotes, contains an
+/// unescaped double quote inside, or carries a malformed escape.
+pub fn unquote(s: &str) -> Result<String, UnescapeError> {
+    let body = s
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .ok_or(UnescapeError::NotQuoted)?;
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Err(UnescapeError::UnescapedQuote),
+            '\\' => {
+                let next = chars.next().ok_or(UnescapeError::DanglingBackslash)?;
+                let decoded = if next == '"' {
+                    Ok('"')
+                } else {
+                    decode_escape(next, &mut chars)
+                        .unwrap_or(Err(UnescapeError::UnknownEscape(next)))
+                }?;
+                out.push(decoded);
+            }
+            c => out.push(c),
+        }
+    }
+    Ok(out)
+}
+
+/// Why [`unescape_inline`] or [`unquote`] rejected its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnescapeError {
@@ -170,6 +232,10 @@ pub enum UnescapeError {
     UnknownEscape(char),
     /// A `\u{...}` escape is malformed or names no Unicode scalar value.
     InvalidCodePoint,
+    /// [`unquote`]: the input is not wrapped in double quotes.
+    NotQuoted,
+    /// [`unquote`]: a double quote inside the token is not escaped.
+    UnescapedQuote,
 }
 
 impl fmt::Display for UnescapeError {
@@ -178,6 +244,8 @@ impl fmt::Display for UnescapeError {
             UnescapeError::DanglingBackslash => f.write_str("input ends with a dangling '\\'"),
             UnescapeError::UnknownEscape(c) => write!(f, "unknown escape '\\{c}'"),
             UnescapeError::InvalidCodePoint => f.write_str("malformed '\\u{...}' escape"),
+            UnescapeError::NotQuoted => f.write_str("input is not wrapped in double quotes"),
+            UnescapeError::UnescapedQuote => f.write_str("unescaped '\"' inside a quoted token"),
         }
     }
 }
@@ -407,6 +475,25 @@ mod tests {
             .join("\n")
     }
 
+    #[test]
+    fn quote_escapes_quotes_and_controls() {
+        assert_eq!(quote(""), "\"\"");
+        assert_eq!(quote("Tag[x]"), "\"Tag[x]\"");
+        assert_eq!(quote("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quote("x\n<sealed:00>"), "\"x\\n<sealed:00>\"");
+    }
+
+    #[test]
+    fn unquote_rejects_malformed_tokens() {
+        assert_eq!(unquote("abc"), Err(UnescapeError::NotQuoted));
+        assert_eq!(unquote("\"abc"), Err(UnescapeError::NotQuoted));
+        assert_eq!(unquote("\""), Err(UnescapeError::NotQuoted));
+        assert_eq!(unquote("\"a\"b\""), Err(UnescapeError::UnescapedQuote));
+        assert_eq!(unquote("\"a\\\""), Err(UnescapeError::DanglingBackslash));
+        assert_eq!(unquote("\"\\q\""), Err(UnescapeError::UnknownEscape('q')));
+        assert_eq!(unquote("\"\"").unwrap(), "");
+    }
+
     proptest! {
         #[test]
         fn escaped_output_has_no_unsafe_characters(s in any::<String>()) {
@@ -418,6 +505,24 @@ mod tests {
         fn unescape_inverts_escape(s in any::<String>()) {
             let escaped = escape_inline(&s);
             prop_assert_eq!(unescape_inline(&escaped).unwrap(), s.as_str());
+        }
+
+        #[test]
+        fn quote_is_one_safe_token_and_reversible(s in any::<String>()) {
+            let q = quote(&s);
+            prop_assert!(q.starts_with('"') && q.ends_with('"') && q.len() >= 2);
+            prop_assert!(!q.chars().any(needs_escape), "{q:?}");
+            // No unescaped quote inside: every interior '"' is preceded by an
+            // odd run of backslashes.
+            let inner = &q[1..q.len() - 1];
+            let mut backslashes = 0usize;
+            for c in inner.chars() {
+                if c == '"' {
+                    prop_assert!(backslashes % 2 == 1, "unescaped quote in {q:?}");
+                }
+                backslashes = if c == '\\' { backslashes + 1 } else { 0 };
+            }
+            prop_assert_eq!(unquote(&q).unwrap(), s);
         }
 
         #[test]
