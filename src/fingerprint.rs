@@ -20,9 +20,11 @@
 //!   within one process (a stage diff). Costs nothing.
 //! - `FingerprintKey::derive` (feature `kdf`), an Argon2id derivation from the
 //!   vault's key material, when fingerprints must be stable across processes
-//!   (git textconv, verifiable audit logs). Breaking such a fingerprint costs
-//!   at least as much as attacking a vault protected with KeePassXC-default
-//!   Argon2 parameters.
+//!   (git textconv, verifiable audit logs). Its [`DeriveParams`] are, per
+//!   component, the maximum of a 64 MiB / 3 passes / 1 lane floor and the
+//!   vault's own Argon2 parameters ([`DeriveParams::for_snapshot`]), so
+//!   breaking such a fingerprint costs at least as much as attacking the vault
+//!   through its own KDF (for an AES-KDF vault, at least the Argon2id floor).
 //!
 //! ```
 //! use kdbx_core::fingerprint::{Domain, FingerprintKey};
@@ -49,6 +51,8 @@ use zeroize::Zeroize;
 
 #[cfg(feature = "kdf")]
 use uuid::Uuid;
+
+use crate::model::{HeaderInfo, KdfInfo, Snapshot};
 
 /// The role of the bytes being fingerprinted. Part of the `v1` format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -95,6 +99,9 @@ pub struct FingerprintKey([u8; 32]);
 impl FingerprintKey {
     /// A key from caller-supplied bytes. Use fresh random bytes per session
     /// for in-process comparisons; the crate itself never draws randomness.
+    ///
+    /// The array is taken by value (it is `Copy`): the key wipes its own copy
+    /// on drop, but the caller's source buffer is the caller's to wipe.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         FingerprintKey(bytes)
     }
@@ -249,18 +256,158 @@ impl fmt::Debug for KeyMaterial<'_> {
     }
 }
 
-/// Fixed Argon2id parameters of `FingerprintKey::derive` (part of the `v1`
-/// format): 64 MiB, 3 passes, 1 lane, 32-byte output.
-#[cfg(feature = "kdf")]
-pub mod kdf_params {
-    /// Memory cost in KiB (64 MiB).
-    pub const MEMORY_KIB: u32 = 64 * 1024;
+/// The salt prefix of `FingerprintKey::derive` (part of the `v1` format); the
+/// vault's root-group UUID bytes follow it.
+pub const DERIVE_SALT_PREFIX: &[u8] = b"kdbx-core/fingerprint/v1";
+
+/// The Argon2id parameters of a fingerprint key derivation.
+///
+/// Never below [`DeriveParams::FLOOR`] (64 MiB, 3 passes, 1 lane) in any
+/// component, and, via [`DeriveParams::for_snapshot`], never below the vault's
+/// own Argon2 parameters, so a fingerprint is never a cheaper oracle on the
+/// master password than the vault itself.
+///
+/// The parameters are part of what a verifier must reproduce: record them
+/// next to the fingerprints (`Display` gives a PHC-style string, serde a
+/// structured form).
+///
+/// ```
+/// use kdbx_core::fingerprint::DeriveParams;
+///
+/// let p = DeriveParams::new(1 << 20, 2, 4);
+/// assert_eq!(p.to_string(), "argon2id$v=19$m=1048576,t=3,p=4");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "DeriveParamsRepr", into = "DeriveParamsRepr")]
+pub struct DeriveParams {
+    memory_kib: u32,
+    iterations: u32,
+    lanes: u32,
+}
+
+/// The serialized form of [`DeriveParams`], checked against the floor on the
+/// way in.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeriveParamsRepr {
+    memory_kib: u32,
+    iterations: u32,
+    lanes: u32,
+}
+
+impl DeriveParams {
+    /// The floor: 64 MiB, 3 passes, 1 lane.
+    pub const FLOOR: DeriveParams = DeriveParams {
+        memory_kib: 64 * 1024,
+        iterations: 3,
+        lanes: 1,
+    };
+
+    /// Parameters with each component raised to at least the floor.
+    pub fn new(memory_kib: u32, iterations: u32, lanes: u32) -> Self {
+        DeriveParams {
+            memory_kib: memory_kib.max(Self::FLOOR.memory_kib),
+            iterations: iterations.max(Self::FLOOR.iterations),
+            lanes: lanes.max(Self::FLOOR.lanes),
+        }
+    }
+
+    /// The parameters for a vault using `kdf`: per component, the maximum of
+    /// the floor and the vault's Argon2 parameters (always run as Argon2id).
+    /// AES-KDF and unrecognized KDFs get the floor.
+    pub fn for_kdf(kdf: &KdfInfo) -> Self {
+        match kdf {
+            KdfInfo::Argon2(a) => {
+                let saturate = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
+                Self::new(
+                    saturate(a.memory_bytes.div_ceil(1024)),
+                    saturate(a.iterations),
+                    a.parallelism,
+                )
+            }
+            KdfInfo::Aes { .. } | KdfInfo::Unrecognized => Self::FLOOR,
+        }
+    }
+
+    /// [`DeriveParams::for_kdf`] of a captured header, or the floor without one.
+    pub fn for_header(header: Option<&HeaderInfo>) -> Self {
+        header.map_or(Self::FLOOR, |h| Self::for_kdf(&h.kdf))
+    }
+
+    /// The parameters for the vault `snap` was captured from.
+    pub fn for_snapshot(snap: &Snapshot) -> Self {
+        Self::for_header(snap.header.as_ref())
+    }
+
+    /// Memory cost in KiB.
+    pub fn memory_kib(&self) -> u32 {
+        self.memory_kib
+    }
+
     /// Number of passes.
-    pub const PASSES: u32 = 3;
+    pub fn iterations(&self) -> u32 {
+        self.iterations
+    }
+
     /// Degree of parallelism.
-    pub const LANES: u32 = 1;
-    /// The salt prefix; the vault's root-group UUID bytes follow it.
-    pub const SALT_PREFIX: &[u8] = b"kdbx-core/fingerprint/v1";
+    pub fn lanes(&self) -> u32 {
+        self.lanes
+    }
+}
+
+/// PHC-style: `argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>`.
+impl fmt::Display for DeriveParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "argon2id$v=19$m={},t={},p={}",
+            self.memory_kib, self.iterations, self.lanes
+        )
+    }
+}
+
+/// The error of deserializing [`DeriveParams`] below the floor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BelowFloorError;
+
+impl fmt::Display for BelowFloorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "derivation parameters below the floor {}",
+            DeriveParams::FLOOR
+        )
+    }
+}
+
+impl std::error::Error for BelowFloorError {}
+
+impl TryFrom<DeriveParamsRepr> for DeriveParams {
+    type Error = BelowFloorError;
+
+    fn try_from(r: DeriveParamsRepr) -> Result<Self, Self::Error> {
+        let params = DeriveParams::new(r.memory_kib, r.iterations, r.lanes);
+        let raw = DeriveParams {
+            memory_kib: r.memory_kib,
+            iterations: r.iterations,
+            lanes: r.lanes,
+        };
+        if params == raw {
+            Ok(params)
+        } else {
+            Err(BelowFloorError)
+        }
+    }
+}
+
+impl From<DeriveParams> for DeriveParamsRepr {
+    fn from(p: DeriveParams) -> Self {
+        DeriveParamsRepr {
+            memory_kib: p.memory_kib,
+            iterations: p.iterations,
+            lanes: p.lanes,
+        }
+    }
 }
 
 /// Why `FingerprintKey::derive` failed.
@@ -271,8 +418,11 @@ pub enum KdfError {
     /// Neither a password nor a key file was supplied. A key derived from no
     /// secret would make fingerprints a dictionary oracle again.
     NoKeyMaterial,
-    /// The Argon2 backend rejected its input. Unreachable with the fixed
-    /// parameters; kept so a backend change cannot panic.
+    /// Argon2 rejected the parameters (for example more lanes than it
+    /// supports, or more memory than the platform can address).
+    InvalidParams,
+    /// The Argon2 backend failed on otherwise valid input. Kept so a backend
+    /// change cannot panic.
     Backend,
 }
 
@@ -281,6 +431,7 @@ impl fmt::Display for KdfError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             KdfError::NoKeyMaterial => f.write_str("no password or key file to derive a key from"),
+            KdfError::InvalidParams => f.write_str("Argon2 rejected the derivation parameters"),
             KdfError::Backend => f.write_str("Argon2 rejected the derivation input"),
         }
     }
@@ -293,50 +444,75 @@ impl std::error::Error for KdfError {}
 impl FingerprintKey {
     /// Derive a process-stable key from the vault's key material.
     ///
-    /// Argon2id ([`kdf_params`]) over `SHA-256(password) || SHA-256(keyfile)`,
-    /// an absent part contributing 32 zero bytes, salted with
-    /// `"kdbx-core/fingerprint/v1" || salt`. Pass the root group's UUID as
-    /// `salt`: it is stable across saves and distinct per vault.
-    pub fn derive(material: &KeyMaterial<'_>, salt: Uuid) -> Result<Self, KdfError> {
+    /// Argon2id with `params` over `SHA-256(password) || SHA-256(keyfile)`, an
+    /// absent part contributing 32 zero bytes, salted with
+    /// [`DERIVE_SALT_PREFIX`] `|| salt`. Pass the root group's UUID as `salt`
+    /// (stable across saves, distinct per vault) and
+    /// [`DeriveParams::for_snapshot`] as `params`, and record `params` next to
+    /// the fingerprints so a verifier can reproduce the key.
+    ///
+    /// The input, the output and Argon2's working memory are wiped. The
+    /// SHA-256 hasher states that absorbed the password and key file are not:
+    /// sha2 0.10 offers no zeroization.
+    pub fn derive(
+        material: &KeyMaterial<'_>,
+        salt: Uuid,
+        params: &DeriveParams,
+    ) -> Result<Self, KdfError> {
         use argon2::{Algorithm, Argon2, Block, Params, Version};
         use sha2::Digest;
+        use sha2::digest::generic_array::GenericArray;
         use zeroize::Zeroizing;
 
         if material.password.is_none() && material.keyfile.is_none() {
             return Err(KdfError::NoKeyMaterial);
         }
-        let digest_or_zero =
-            |part: Option<&[u8]>| part.map_or([0u8; 32], |bytes| Sha256::digest(bytes).into());
-        let mut input = Zeroizing::new([0u8; 64]);
-        input[..32].copy_from_slice(&digest_or_zero(material.password));
-        input[32..].copy_from_slice(&digest_or_zero(material.keyfile));
-
-        let mut full_salt = Vec::with_capacity(kdf_params::SALT_PREFIX.len() + 16);
-        full_salt.extend_from_slice(kdf_params::SALT_PREFIX);
-        full_salt.extend_from_slice(salt.as_bytes());
-
-        let params = Params::new(
-            kdf_params::MEMORY_KIB,
-            kdf_params::PASSES,
-            kdf_params::LANES,
+        // Checked before Params::new, which overflows (and panics in debug
+        // builds) on a lane count beyond Argon2's limit.
+        if params.lanes() > Params::MAX_P_COST
+            || u64::from(params.memory_kib()) < 8 * u64::from(params.lanes())
+        {
+            return Err(KdfError::InvalidParams);
+        }
+        let argon_params = Params::new(
+            params.memory_kib(),
+            params.iterations(),
+            params.lanes(),
             Some(32),
         )
-        .map_err(|_| KdfError::Backend)?;
-        let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-        let mut blocks = vec![Block::default(); argon.params().block_count()];
-        let mut out = [0u8; 32];
-        let result = argon.hash_password_into_with_memory(
-            input.as_slice(),
-            &full_salt,
-            &mut out,
-            &mut blocks,
-        );
-        // The working memory holds intermediate state derived from the secret.
-        for block in &mut blocks {
-            *block = Block::default();
+        .map_err(|_| KdfError::InvalidParams)?;
+
+        // Hash straight into the wiped input buffer: no digest temporaries.
+        let mut input = Zeroizing::new([0u8; 64]);
+        let (pw_half, kf_half) = input.split_at_mut(32);
+        for (part, half) in [(material.password, pw_half), (material.keyfile, kf_half)] {
+            if let Some(bytes) = part {
+                Sha256::new_with_prefix(bytes).finalize_into(GenericArray::from_mut_slice(half));
+            }
         }
-        result.map_err(|_| KdfError::Backend)?;
-        Ok(FingerprintKey(out))
+
+        let mut full_salt = Vec::with_capacity(DERIVE_SALT_PREFIX.len() + 16);
+        full_salt.extend_from_slice(DERIVE_SALT_PREFIX);
+        full_salt.extend_from_slice(salt.as_bytes());
+
+        let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_params);
+        // Fallible allocation: a vault's memory cost comes from its file.
+        let block_count = argon.params().block_count();
+        let mut blocks = Zeroizing::new(Vec::new());
+        blocks
+            .try_reserve_exact(block_count)
+            .map_err(|_| KdfError::InvalidParams)?;
+        blocks.resize(block_count, Block::default());
+        let mut out = Zeroizing::new([0u8; 32]);
+        argon
+            .hash_password_into_with_memory(
+                input.as_slice(),
+                &full_salt,
+                out.as_mut(),
+                blocks.as_mut_slice(),
+            )
+            .map_err(|_| KdfError::Backend)?;
+        Ok(FingerprintKey(*out))
     }
 }
 
@@ -463,6 +639,100 @@ mod tests {
         );
     }
 
+    mod derive_params {
+        use super::*;
+        use crate::model::{
+            Argon2Info, Argon2Variant, Compression, FormatVersion, Group, HeaderInfo, InnerCipher,
+            KdfInfo, Meta, OuterCipher, Snapshot,
+        };
+
+        fn argon2(memory_bytes: u64, iterations: u64, parallelism: u32) -> KdfInfo {
+            KdfInfo::Argon2(Argon2Info::new(
+                Argon2Variant::Argon2d,
+                memory_bytes,
+                iterations,
+                parallelism,
+                0x13,
+            ))
+        }
+
+        fn snapshot_with(kdf: Option<KdfInfo>) -> Snapshot {
+            let mut snap = Snapshot::new(
+                FormatVersion::KDBX_4_0,
+                Meta::default(),
+                Group::new(uuid::Uuid::nil(), "Root"),
+            );
+            snap.header = kdf.map(|kdf| {
+                HeaderInfo::new(
+                    kdf,
+                    OuterCipher::Aes256,
+                    InnerCipher::ChaCha20,
+                    Compression::GZip,
+                )
+            });
+            snap
+        }
+
+        fn triple(p: DeriveParams) -> (u32, u32, u32) {
+            (p.memory_kib(), p.iterations(), p.lanes())
+        }
+
+        #[test]
+        fn floor_is_64_mib_3_passes_1_lane() {
+            assert_eq!(triple(DeriveParams::FLOOR), (64 * 1024, 3, 1));
+        }
+
+        #[test]
+        fn params_are_the_per_component_max_of_floor_and_vault() {
+            let cases = [
+                // No header, AES-KDF, or an unknown KDF: the floor.
+                (None, (65_536, 3, 1)),
+                (Some(KdfInfo::Aes { rounds: 60_000 }), (65_536, 3, 1)),
+                (Some(KdfInfo::Unrecognized), (65_536, 3, 1)),
+                // keepass's default Argon2d: 1 MiB, 50 passes, 4 lanes.
+                (Some(argon2(1 << 20, 50, 4)), (65_536, 50, 4)),
+                // A memory-heavy vault: 256 MiB, 2 passes.
+                (Some(argon2(256 << 20, 2, 1)), (262_144, 3, 1)),
+                // Odd byte counts round up to whole KiB.
+                (Some(argon2((128 << 20) + 1, 3, 1)), (131_073, 3, 1)),
+            ];
+            for (kdf, want) in cases {
+                assert_eq!(
+                    triple(DeriveParams::for_snapshot(&snapshot_with(kdf))),
+                    want,
+                    "{kdf:?}"
+                );
+            }
+            // Absurd values saturate instead of wrapping.
+            assert_eq!(
+                triple(DeriveParams::for_kdf(&argon2(u64::MAX, u64::MAX, 2))),
+                (u32::MAX, u32::MAX, 2)
+            );
+        }
+
+        #[test]
+        fn new_raises_each_component_to_the_floor() {
+            assert_eq!(triple(DeriveParams::new(1, 1, 0)), (65_536, 3, 1));
+            assert_eq!(triple(DeriveParams::new(1 << 20, 2, 8)), (1 << 20, 3, 8));
+        }
+
+        #[test]
+        fn params_display_and_serialize_for_recording() {
+            let p = DeriveParams::new(1 << 20, 50, 4);
+            assert_eq!(p.to_string(), "argon2id$v=19$m=1048576,t=50,p=4");
+            let json = serde_json::to_string(&p).unwrap();
+            assert_eq!(json, r#"{"memory_kib":1048576,"iterations":50,"lanes":4}"#);
+            assert_eq!(serde_json::from_str::<DeriveParams>(&json).unwrap(), p);
+            // Recorded params below the floor were never produced by derive.
+            assert!(
+                serde_json::from_str::<DeriveParams>(
+                    r#"{"memory_kib":1024,"iterations":3,"lanes":1}"#
+                )
+                .is_err()
+            );
+        }
+    }
+
     #[cfg(feature = "kdf")]
     mod kdf {
         use super::*;
@@ -476,18 +746,22 @@ mod tests {
 
         /// Derive the key bytes with an independent Argon2 implementation
         /// (rust-argon2, the one keepass uses) from the documented recipe.
-        fn reference_key_bytes(password: Option<&[u8]>, keyfile: Option<&[u8]>) -> Vec<u8> {
+        fn reference_key_bytes(
+            password: Option<&[u8]>,
+            keyfile: Option<&[u8]>,
+            params: &DeriveParams,
+        ) -> Vec<u8> {
             let mut input = Vec::new();
             input.extend(password.map_or([0; 32], sha256));
             input.extend(keyfile.map_or([0; 32], sha256));
-            let mut salt = kdf_params::SALT_PREFIX.to_vec();
+            let mut salt = DERIVE_SALT_PREFIX.to_vec();
             salt.extend_from_slice(SALT.as_bytes());
             let config = rust_argon2::Config {
                 variant: rust_argon2::Variant::Argon2id,
                 version: rust_argon2::Version::Version13,
-                mem_cost: kdf_params::MEMORY_KIB,
-                time_cost: kdf_params::PASSES,
-                lanes: kdf_params::LANES,
+                mem_cost: params.memory_kib(),
+                time_cost: params.iterations(),
+                lanes: params.lanes(),
                 hash_length: 32,
                 ..rust_argon2::Config::default()
             };
@@ -499,51 +773,80 @@ mod tests {
         }
 
         #[test]
-        fn derive_matches_the_documented_recipe_and_pinned_vector() {
+        fn derive_at_the_floor_matches_the_reference_and_pinned_vector() {
             let material = KeyMaterial::new(Some(b"test-password-do-not-use"), None);
-            let key = FingerprintKey::derive(&material, SALT).unwrap();
-            let reference = reference_key_bytes(Some(b"test-password-do-not-use"), None);
+            let params = DeriveParams::FLOOR;
+            let key = FingerprintKey::derive(&material, SALT, &params).unwrap();
+            let reference = reference_key_bytes(Some(b"test-password-do-not-use"), None, &params);
             assert_eq!(key_bytes(&key).as_slice(), reference.as_slice());
             // Pinned so the v1 format can never drift silently.
-            assert_eq!(HEXLOWER.encode(key_bytes(&key)), PINNED_PASSWORD_ONLY);
+            assert_eq!(HEXLOWER.encode(key_bytes(&key)), PINNED_FLOOR);
             assert_eq!(
                 key.fingerprint(Domain::Field, b"1234").to_hex(),
-                PINNED_PIN_FINGERPRINT
+                PINNED_FLOOR_PIN_FINGERPRINT
             );
         }
 
         #[test]
+        fn derive_above_the_floor_matches_the_reference_and_pinned_vector() {
+            let material = KeyMaterial::new(Some(b"test-password-do-not-use"), None);
+            let params = DeriveParams::new(96 * 1024, 4, 2);
+            let key = FingerprintKey::derive(&material, SALT, &params).unwrap();
+            let reference = reference_key_bytes(Some(b"test-password-do-not-use"), None, &params);
+            assert_eq!(key_bytes(&key).as_slice(), reference.as_slice());
+            assert_eq!(HEXLOWER.encode(key_bytes(&key)), PINNED_M96_T4_P2);
+        }
+
+        #[test]
         fn derive_with_keyfile_matches_the_reference() {
+            let params = DeriveParams::FLOOR;
             let material = KeyMaterial::new(Some(b"pw"), Some(b"<KeyFile/>"));
-            let key = FingerprintKey::derive(&material, SALT).unwrap();
-            let reference = reference_key_bytes(Some(b"pw"), Some(b"<KeyFile/>"));
+            let key = FingerprintKey::derive(&material, SALT, &params).unwrap();
+            let reference = reference_key_bytes(Some(b"pw"), Some(b"<KeyFile/>"), &params);
             assert_eq!(key_bytes(&key).as_slice(), reference.as_slice());
 
             let keyfile_only = KeyMaterial::new(None, Some(b"<KeyFile/>"));
-            let key = FingerprintKey::derive(&keyfile_only, SALT).unwrap();
-            let reference = reference_key_bytes(None, Some(b"<KeyFile/>"));
+            let key = FingerprintKey::derive(&keyfile_only, SALT, &params).unwrap();
+            let reference = reference_key_bytes(None, Some(b"<KeyFile/>"), &params);
             assert_eq!(key_bytes(&key).as_slice(), reference.as_slice());
         }
 
         #[test]
-        fn derive_depends_on_salt() {
+        fn derive_depends_on_salt_and_params() {
             let material = KeyMaterial::new(Some(b"pw"), None);
-            let a = FingerprintKey::derive(&material, SALT).unwrap();
-            let b = FingerprintKey::derive(&material, Uuid::from_u128(2)).unwrap();
+            let floor = DeriveParams::FLOOR;
+            let a = FingerprintKey::derive(&material, SALT, &floor).unwrap();
+            let b = FingerprintKey::derive(&material, Uuid::from_u128(2), &floor).unwrap();
+            let c = FingerprintKey::derive(&material, SALT, &DeriveParams::new(0, 4, 1)).unwrap();
             assert_ne!(key_bytes(&a), key_bytes(&b));
+            assert_ne!(key_bytes(&a), key_bytes(&c));
         }
 
         #[test]
         fn derive_refuses_empty_key_material() {
             assert_eq!(
-                FingerprintKey::derive(&KeyMaterial::default(), SALT).unwrap_err(),
+                FingerprintKey::derive(&KeyMaterial::default(), SALT, &DeriveParams::FLOOR)
+                    .unwrap_err(),
                 KdfError::NoKeyMaterial
             );
         }
 
-        const PINNED_PASSWORD_ONLY: &str =
+        #[test]
+        fn derive_reports_parameters_argon2_rejects() {
+            // More lanes than Argon2 allows.
+            let params = DeriveParams::new(0, 0, u32::MAX);
+            assert_eq!(
+                FingerprintKey::derive(&KeyMaterial::new(Some(b"pw"), None), SALT, &params)
+                    .unwrap_err(),
+                KdfError::InvalidParams
+            );
+        }
+
+        const PINNED_FLOOR: &str =
             "f0fb42b4dcdfe75e9f38791729c3feb45172ae70e225cf6f0389069ecb42f6af";
-        const PINNED_PIN_FINGERPRINT: &str =
+        const PINNED_FLOOR_PIN_FINGERPRINT: &str =
             "380586ba3b18b1f5d9739b56eb47028e720451843598fe5078472f07dd93e93c";
+        const PINNED_M96_T4_P2: &str =
+            "73d3fb59f607ad267c2cc92d07fee5642a3cf58bbd11f0e21b11abb993b6871b";
     }
 }

@@ -2,12 +2,15 @@
 //! `Database`.
 //!
 //! Each supported keepass version is an additive feature (`keepass-0_12`,
-//! `keepass-0_15`) with its own module exposing the same two functions:
+//! `keepass-0_15`) with its own module exposing the same three functions:
 //!
 //! - `capture(&Database, &Sealing) -> Snapshot`: a pure, infallible
 //!   transformation of an already-opened database. Every model field is
 //!   mapped; [`Sealing`](crate::model::Sealing) decides what plaintext is
 //!   copied.
+//! - `header(&Database) -> HeaderInfo`: the outer header's security
+//!   configuration alone, so a stable fingerprint key can be derived with
+//!   `DeriveParams::for_header` before capturing.
 //! - `otp_fields(&Entry) -> OtpFields`: the plaintext of an entry's
 //!   OTP-related fields only, so callers that capture under fingerprint sealing
 //!   can still compute TOTP codes (see [`crate::otp`]).
@@ -87,7 +90,7 @@ macro_rules! keepass_adapter {
                 meta(db, sealing),
                 group(db.root(), sealing),
             );
-            snap.header = Some(header_info(&db.config));
+            snap.header = Some(header(db));
             snap.deleted_objects = db
                 .deleted_objects
                 .iter()
@@ -117,7 +120,11 @@ macro_rules! keepass_adapter {
             }
         }
 
-        fn header_info(config: &::$kp::config::DatabaseConfig) -> HeaderInfo {
+        /// The outer header's security configuration, without capturing the
+        /// rest: what `DeriveParams::for_header` needs before a fingerprint
+        /// key (and so a capture) exists.
+        pub fn header(db: &::$kp::Database) -> HeaderInfo {
+            let config = &db.config;
             use ::$kp::config::{
                 CompressionConfig, InnerCipherConfig, KdfConfig, OuterCipherConfig,
             };

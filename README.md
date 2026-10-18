@@ -52,18 +52,22 @@ The library performs no I/O, reads no clock, and builds for
 ## Example
 
 ```rust
-use kdbx_core::capture::keepass_0_15::capture;
-use kdbx_core::fingerprint::{FingerprintKey, KeyMaterial};
+use kdbx_core::capture::keepass_0_15::{capture, header};
+use kdbx_core::fingerprint::{DeriveParams, FingerprintKey, KeyMaterial};
 use kdbx_core::model::Sealing;
 use kdbx_core::path::path_of;
 use kdbx_core::visibility::metadata_value;
 
 let db: keepass_0_15::Database = open_somehow();
 
-// A key stable across processes (feature `kdf`), salted with the root UUID.
+// A key stable across processes (feature `kdf`), salted with the root UUID,
+// never cheaper to attack than the vault's own KDF. Record `params` next to
+// any fingerprint you publish: a verifier needs them.
+let params = DeriveParams::for_header(Some(&header(&db)));
 let key = FingerprintKey::derive(
     &KeyMaterial::new(Some(b"master password"), None),
     db.root().id().uuid(),
+    &params,
 )?;
 let snap = capture(&db, &Sealing::Fingerprint(&key));
 

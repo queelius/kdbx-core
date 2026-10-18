@@ -64,6 +64,28 @@ fn saved_file_captures_like_the_in_memory_database() {
 }
 
 #[test]
+fn header_alone_matches_the_captured_header_and_sets_derive_params() {
+    use kdbx_core::capture::keepass_0_15::header;
+    use kdbx_core::fingerprint::DeriveParams;
+    let (db, _) = rich_db();
+    let key = key();
+    let snap = capture(&db, &Sealing::Fingerprint(&key));
+    assert_eq!(Some(header(&db)), snap.header);
+    // AES-KDF vault: the derivation floor.
+    assert_eq!(
+        DeriveParams::for_header(Some(&header(&db))),
+        DeriveParams::FLOOR
+    );
+    assert_eq!(DeriveParams::for_snapshot(&snap), DeriveParams::FLOOR);
+    // keepass's default config is Argon2d, 1 MiB, 50 passes, 4 lanes.
+    let params = DeriveParams::for_header(Some(&header(&kp::Database::new())));
+    assert_eq!(
+        (params.memory_kib(), params.iterations(), params.lanes()),
+        (65_536, 50, 4)
+    );
+}
+
+#[test]
 fn capture_is_deterministic() {
     let (db, _) = rich_db();
     let key = key();
