@@ -37,24 +37,63 @@ use std::borrow::Cow;
 use std::fmt;
 use std::str::Chars;
 
-use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+/// The Unicode version the escape table behind [`needs_escape`] was generated
+/// from.
+pub const ESCAPE_TABLE_UNICODE_VERSION: (u64, u64, u64) = (17, 0, 0);
+
+/// Every code point in General_Category `Cc`, `Cf`, `Zl` or `Zp`, as sorted,
+/// disjoint, inclusive ranges (Unicode 17.0.0).
+///
+/// A compact table instead of a general-category lookup keeps a full
+/// Unicode property table out of WASM builds. A test compares it against
+/// `unicode-properties` for every code point, and fails when that crate moves
+/// to another Unicode version, so the table cannot drift silently.
+const ESCAPE_RANGES: &[(char, char)] = &[
+    ('\u{0}', '\u{1F}'),
+    ('\u{7F}', '\u{9F}'),
+    ('\u{AD}', '\u{AD}'),
+    ('\u{600}', '\u{605}'),
+    ('\u{61C}', '\u{61C}'),
+    ('\u{6DD}', '\u{6DD}'),
+    ('\u{70F}', '\u{70F}'),
+    ('\u{890}', '\u{891}'),
+    ('\u{8E2}', '\u{8E2}'),
+    ('\u{180E}', '\u{180E}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{2028}', '\u{202E}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFF9}', '\u{FFFB}'),
+    ('\u{110BD}', '\u{110BD}'),
+    ('\u{110CD}', '\u{110CD}'),
+    ('\u{13430}', '\u{1343F}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
+    ('\u{E0001}', '\u{E0001}'),
+    ('\u{E0020}', '\u{E007F}'),
+];
 
 /// True when `c` may not appear verbatim in a rendered line.
 ///
 /// That is every character in Unicode General_Category `Cc` (controls,
 /// including line feed and the ANSI escape), `Cf` (format characters,
 /// including the bidirectional overrides that reorder displayed text), `Zl`
-/// (line separator) and `Zp` (paragraph separator). The backslash is not in
-/// this set: it is escaped as `\\` because it introduces escapes, not because
-/// it is unsafe to display.
+/// (line separator) and `Zp` (paragraph separator), per Unicode 17.0.0. The
+/// backslash is not in this set: it is escaped as `\\` because it introduces
+/// escapes, not because it is unsafe to display.
 pub fn needs_escape(c: char) -> bool {
-    matches!(
-        c.general_category(),
-        GeneralCategory::Control
-            | GeneralCategory::Format
-            | GeneralCategory::LineSeparator
-            | GeneralCategory::ParagraphSeparator
-    )
+    ESCAPE_RANGES
+        .binary_search_by(|&(lo, hi)| {
+            if hi < c {
+                std::cmp::Ordering::Less
+            } else if lo > c {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
 }
 
 /// Escape `s` so it renders as exactly one printable line.
@@ -215,6 +254,40 @@ fn decode_code_point(rest: &mut Chars<'_>) -> Result<char, UnescapeError> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn escape_table_agrees_with_unicode_general_category_for_every_char() {
+        use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+        // The table is a snapshot of one Unicode version; a dependency bump
+        // to another version must be a deliberate table regeneration.
+        let (major, minor, update) = unicode_properties::UNICODE_VERSION;
+        assert_eq!(
+            (major, minor, update),
+            ESCAPE_TABLE_UNICODE_VERSION,
+            "regenerate ESCAPE_RANGES for the new Unicode version"
+        );
+        for c in (0..=0x10FFFF_u32).filter_map(char::from_u32) {
+            let expected = matches!(
+                c.general_category(),
+                GeneralCategory::Control
+                    | GeneralCategory::Format
+                    | GeneralCategory::LineSeparator
+                    | GeneralCategory::ParagraphSeparator
+            );
+            assert_eq!(needs_escape(c), expected, "U+{:04X}", u32::from(c));
+        }
+    }
+
+    #[test]
+    fn escape_table_is_sorted_and_disjoint() {
+        for pair in ESCAPE_RANGES.windows(2) {
+            let ((a_lo, a_hi), (b_lo, _)) = (pair[0], pair[1]);
+            assert!(
+                a_lo <= a_hi && u32::from(a_hi) + 1 < u32::from(b_lo),
+                "{pair:?}"
+            );
+        }
+    }
 
     #[test]
     fn plain_text_is_borrowed_unchanged() {
