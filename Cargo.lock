@@ -603,6 +603,7 @@ dependencies = [
  "keepass 0.12.9",
  "keepass 0.15.3",
  "proptest",
+ "rust-argon2",
  "serde",
  "serde_json",
  "sha1",
