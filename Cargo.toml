@@ -11,8 +11,9 @@ repository = "https://github.com/queelius/kdbx-core"
 readme = "README.md"
 keywords = ["keepass", "kdbx", "vault", "totp", "password"]
 categories = ["cryptography", "data-structures"]
-# The corpus stays in the package so `cargo test` works from the tarball.
-exclude = [".github/", "CLAUDE.md"]
+# The corpus (with its third-party license) stays in the package so
+# `cargo test` works from the tarball; design docs and proptest seeds do not.
+exclude = [".github/", "CLAUDE.md", "docs/superpowers/", "proptest-regressions/"]
 
 [features]
 default = ["kdf"]

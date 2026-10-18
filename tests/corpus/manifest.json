@@ -10,7 +10,7 @@
       "password": "demopass",
       "keyfile": null,
       "origin": "Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; file last changed upstream in 9b8e2cf (#317). Written by KeePassXC 2.7.12.",
-      "license": "MIT (keepass-rs)",
+      "license": "MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in LICENSE-keepass-rs",
       "exercises": [
         "KDBX 4.1 written by a real KeePassXC build"
       ],
@@ -30,7 +30,7 @@
       "password": "demopass",
       "keyfile": null,
       "origin": "Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in 9b8e2cf (#317).",
-      "license": "MIT (keepass-rs)",
+      "license": "MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in LICENSE-keepass-rs",
       "exercises": [
         "KDBX 4.0, Argon2d KDF"
       ],
@@ -50,7 +50,7 @@
       "password": "test",
       "keyfile": null,
       "origin": "Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in 0aface3 (#84).",
-      "license": "MIT (keepass-rs)",
+      "license": "MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in LICENSE-keepass-rs",
       "exercises": [
         "otpauth URI in the otp field"
       ],
@@ -70,7 +70,7 @@
       "password": "demopass",
       "keyfile": "keepass-rs_test_db_kdbx4_with_keyfile_v2.keyx",
       "origin": "Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in 9b8e2cf (#317).",
-      "license": "MIT (keepass-rs)",
+      "license": "MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in LICENSE-keepass-rs",
       "exercises": [
         "password plus a version 2 XML key file"
       ],
@@ -87,7 +87,7 @@
       "password": null,
       "keyfile": null,
       "origin": "Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in b50d395 (#213).",
-      "license": "MIT (keepass-rs)",
+      "license": "MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in LICENSE-keepass-rs",
       "exercises": [
         "key file of keepass-rs_test_db_kdbx4_with_keyfile_v2.kdbx"
       ],
@@ -104,7 +104,7 @@
       "password": "demopass",
       "keyfile": null,
       "origin": "Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in 28c078c (#384).",
-      "license": "MIT (keepass-rs)",
+      "license": "MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in LICENSE-keepass-rs",
       "exercises": [
         "KDBX 3.1",
         "attachments, including an empty one"
@@ -124,7 +124,7 @@
       "password": "demopass",
       "keyfile": null,
       "origin": "Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in 9b8e2cf (#317).",
-      "license": "MIT (keepass-rs)",
+      "license": "MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in LICENSE-keepass-rs",
       "exercises": [
         "an entry moved to the recycle bin",
         "an entry with an empty Title"
@@ -202,6 +202,20 @@
         "keepass-0_12",
         "keepass-0_15"
       ]
+    },
+    {
+      "file": "LICENSE-keepass-rs",
+      "kind": "license",
+      "kdbx_version": null,
+      "password": null,
+      "keyfile": null,
+      "origin": "Copied unmodified from the LICENSE file of keepass-rs (queelius/keepass-rs fork at commit 9fda3c5).",
+      "license": "MIT",
+      "exercises": [
+        "the license of every keepass-rs_* file in this corpus"
+      ],
+      "sha256": "4c1db422db5330e34880d573f18435f8893ec1e35b5172051919b7f693fb96b5",
+      "readers": []
     }
   ]
 }

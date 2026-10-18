@@ -24,6 +24,8 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Docs
         run: cargo doc --no-deps --all-features
+      - name: Package (publish dry run)
+        run: cargo publish --dry-run
 
   test:
     runs-on: ubuntu-latest

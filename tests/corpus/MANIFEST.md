@@ -6,6 +6,9 @@ the tests read (`tests/corpus.rs` verifies every checksum, that this directory
 holds exactly the listed files, and that this document mentions every file and
 its current checksum); this document is its human-readable twin.
 
+The `keepass-rs_*` files are MIT-licensed by their authors; the license text
+with its copyright notice is `LICENSE-keepass-rs`, which ships with them.
+
 All passwords here are published test credentials. Never put anything
 resembling real data in a corpus file.
 
@@ -41,7 +44,7 @@ The other files are copies and are never regenerated.
 | Readable by | keepass-0_12, keepass-0_15 |
 | Exercises | KDBX 4.1 written by a real KeePassXC build |
 | Origin | Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; file last changed upstream in 9b8e2cf (#317). Written by KeePassXC 2.7.12. |
-| License | MIT (keepass-rs) |
+| License | MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in `LICENSE-keepass-rs` |
 | SHA-256 | `b3c9b3f3df36f71421e4075f038d1cf7d72f14fdbb5abf10a0a4b5308c93adb9` |
 
 ### `keepass-rs_test_db_kdbx4_with_password_argon2.kdbx`
@@ -54,7 +57,7 @@ The other files are copies and are never regenerated.
 | Readable by | keepass-0_12, keepass-0_15 |
 | Exercises | KDBX 4.0, Argon2d KDF |
 | Origin | Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in 9b8e2cf (#317). |
-| License | MIT (keepass-rs) |
+| License | MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in `LICENSE-keepass-rs` |
 | SHA-256 | `4c8c11173f1f5894d6ba606e2f58da07b50a66d79486bac2daa1f23b7e3ca3cf` |
 
 ### `keepass-rs_test_db_kdbx4_with_totp_entry.kdbx`
@@ -67,7 +70,7 @@ The other files are copies and are never regenerated.
 | Readable by | keepass-0_12, keepass-0_15 |
 | Exercises | otpauth URI in the otp field |
 | Origin | Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in 0aface3 (#84). |
-| License | MIT (keepass-rs) |
+| License | MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in `LICENSE-keepass-rs` |
 | SHA-256 | `01de128cb6c2257b7f308e3be17ce96b5e203a3e6ca105df28026b39508e70c5` |
 
 ### `keepass-rs_test_db_kdbx4_with_keyfile_v2.kdbx`
@@ -80,7 +83,7 @@ The other files are copies and are never regenerated.
 | Readable by | keepass-0_12, keepass-0_15 |
 | Exercises | password plus a version 2 XML key file |
 | Origin | Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in 9b8e2cf (#317). |
-| License | MIT (keepass-rs) |
+| License | MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in `LICENSE-keepass-rs` |
 | SHA-256 | `b2c36cb02ac0c785ce20d24cafc7d28b14e62d83d82b07f57627779e3b46581a` |
 
 ### `keepass-rs_test_db_kdbx4_with_keyfile_v2.keyx`
@@ -93,7 +96,7 @@ The other files are copies and are never regenerated.
 | Readable by | n/a |
 | Exercises | key file of keepass-rs_test_db_kdbx4_with_keyfile_v2.kdbx |
 | Origin | Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in b50d395 (#213). |
-| License | MIT (keepass-rs) |
+| License | MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in `LICENSE-keepass-rs` |
 | SHA-256 | `1f03ba4f0f36aea54774240844cbc7f74f23e145220054aa65e6ef8a6c928bb1` |
 
 ### `keepass-rs_test_db_kdbx3_with_attachments.kdbx`
@@ -106,7 +109,7 @@ The other files are copies and are never regenerated.
 | Readable by | keepass-0_15 |
 | Exercises | KDBX 3.1; attachments, including an empty one |
 | Origin | Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in 28c078c (#384). |
-| License | MIT (keepass-rs) |
+| License | MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in `LICENSE-keepass-rs` |
 | SHA-256 | `014421cf9f49a951670b70f03002c279c85567a1a4fcc201cc387eb4b8c1d57c` |
 
 ### `keepass-rs_test_db_kdbx4_with_password_deleted_entry.kdbx`
@@ -119,7 +122,7 @@ The other files are copies and are never regenerated.
 | Readable by | keepass-0_12, keepass-0_15 |
 | Exercises | an entry moved to the recycle bin; an entry with an empty Title |
 | Origin | Copied unmodified from tests/resources/ of keepass-rs (https://github.com/sseemayer/keepass-rs), MIT, via the queelius/keepass-rs fork at commit 9fda3c5; last changed in 9b8e2cf (#317). |
-| License | MIT (keepass-rs) |
+| License | MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in `LICENSE-keepass-rs` |
 | SHA-256 | `cdf0ddb068961b5fef7f17db5c1ef313fb2baeda166b13a11a7ba1de1b2f7f80` |
 
 ### `diff-kdbx_legacy_kdbx40.kdbx`
@@ -160,3 +163,12 @@ The other files are copies and are never regenerated.
 | Origin | Generated by examples/gen_corpus.rs: kdbx-core_corpus_v41.kdbx re-saved by keepass 0.12 (same records and UUIDs). |
 | License | MIT (kdbx-core) |
 | SHA-256 | `5af9f50d2ea232078d056c10ae289bcb39f3a42637cc77944536dc33e4888e6a` |
+
+### `LICENSE-keepass-rs`
+
+| | |
+|---|---|
+| Kind | license |
+| Covers | every `keepass-rs_*` file above |
+| Origin | Copied unmodified from the LICENSE file of keepass-rs (queelius/keepass-rs fork at commit 9fda3c5) |
+| SHA-256 | `4c1db422db5330e34880d573f18435f8893ec1e35b5172051919b7f693fb96b5` |

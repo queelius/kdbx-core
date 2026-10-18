@@ -47,6 +47,7 @@ struct CorpusFile {
 enum Kind {
     Vault,
     Keyfile,
+    License,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -83,6 +84,27 @@ fn by_name(name: &str) -> CorpusFile {
         .into_iter()
         .find(|f| f.file == name)
         .unwrap_or_else(|| panic!("{name} is not in the manifest"))
+}
+
+#[test]
+fn keepass_rs_files_carry_their_license() {
+    let manifest = manifest();
+    let license = fs::read_to_string(corpus_dir().join("LICENSE-keepass-rs")).unwrap();
+    assert!(
+        license.starts_with("MIT License")
+            && license.contains("Copyright (c) 2019 Stefan Seemayer")
+    );
+    for f in manifest
+        .files
+        .iter()
+        .filter(|f| f.file.starts_with("keepass-rs_"))
+    {
+        assert!(
+            f.license.contains("LICENSE-keepass-rs"),
+            "{} does not reference its license",
+            f.file
+        );
+    }
 }
 
 #[test]
@@ -131,6 +153,11 @@ fn manifest_lists_exactly_the_corpus_files_and_the_markdown_agrees() {
             f.file
         );
         assert_eq!(f.kind == Kind::Vault, f.password.is_some(), "{}", f.file);
+        // Every third-party file names its license, and the license file it
+        // points to ships in the corpus.
+        if f.license.contains("LICENSE-keepass-rs") {
+            assert!(listed.contains(&"LICENSE-keepass-rs"), "{}", f.file);
+        }
     }
 }
 
