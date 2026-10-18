@@ -26,7 +26,12 @@
 //!   parent. Such nodes are addressed by UUID.
 //!
 //! [`VaultPath::format`] is canonical and exact: `parse(format(p)) == p`, and
-//! group paths keep their trailing `/`.
+//! group paths keep their trailing `/`. Paths are canonical values: names are
+//! held NFC-normalized and `:1` is held as a bare name, so paths that resolve
+//! alike compare equal and format identically. `parse` accepts some
+//! non-canonical spellings (raw control characters, lowercase or
+//! unnecessary `\u{...}` escapes, `\:` on a colon that needs no escape,
+//! `:1`), and `format` always emits the canonical one.
 //!
 //! Resolution never touches a filesystem: `/../../etc` is just a group named
 //! `..` that does not exist.
@@ -159,15 +164,24 @@ impl std::error::Error for ResolveError {}
 
 impl Segment {
     /// A segment named `name`, optionally with a 1-based ordinal.
+    ///
+    /// Segments are canonical: the name is stored NFC-normalized and an
+    /// ordinal of 1 is stored as none (a bare name means `:1`), so two
+    /// segments that resolve alike compare equal and format identically.
     pub fn new(name: impl Into<String>, ordinal: Option<usize>) -> Result<Self, PathError> {
-        let name = name.into();
+        let name: String = name.into();
         if name.is_empty() {
             return Err(PathError::EmptySegment);
         }
-        if ordinal == Some(0) {
-            return Err(PathError::ZeroOrdinal);
-        }
-        Ok(Segment { name, ordinal })
+        let ordinal = match ordinal {
+            Some(0) => return Err(PathError::ZeroOrdinal),
+            Some(1) | None => None,
+            Some(n) => Some(n),
+        };
+        Ok(Segment {
+            name: nfc(&name),
+            ordinal,
+        })
     }
 
     /// The record name (escapes decoded, ordinal stripped).
@@ -175,7 +189,8 @@ impl Segment {
         &self.name
     }
 
-    /// The `:N` ordinal, if written. `None` means the same as `Some(1)`.
+    /// The `:N` ordinal when it is 2 or more; `None` means the first (or only)
+    /// sibling of that name.
     pub fn ordinal(&self) -> Option<usize> {
         self.ordinal
     }

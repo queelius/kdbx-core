@@ -419,8 +419,31 @@ fn path_of_group_round_trips_and_root_is_slash() {
 #[test]
 fn path_of_disambiguates_duplicate_siblings() {
     let snap = build_snap();
-    assert_eq!(path_of(&snap, id(20)).unwrap().format(), "/Web/Dup:1");
+    // Ordinal 1 is canonically written bare.
+    assert_eq!(path_of(&snap, id(20)).unwrap().format(), "/Web/Dup");
     assert_eq!(path_of(&snap, id(21)).unwrap().format(), "/Web/Dup:2");
+}
+
+#[test]
+fn equal_resolving_paths_compare_equal_and_format_identically() {
+    let pairs = [
+        ("/Caf\\u{65}\\u{301}/", "/Caf\\u{e9}/"),
+        ("/Caf\u{0065}\u{0301}/x", "/Caf\u{00e9}/x"),
+        ("/Web/Dup:1", "/Web/Dup"),
+        ("/a\\:b", "/a:b"),
+        ("/\\u{41}", "/A"),
+    ];
+    for (a, b) in pairs {
+        let (pa, pb) = (VaultPath::parse(a).unwrap(), VaultPath::parse(b).unwrap());
+        assert_eq!(pa, pb, "{a} vs {b}");
+        assert_eq!(pa.format(), pb.format(), "{a} vs {b}");
+    }
+    assert_eq!(Segment::new("x", Some(1)).unwrap().ordinal(), None);
+    assert_eq!(
+        Segment::new("Caf\u{0065}\u{0301}", None).unwrap().name(),
+        "Caf\u{00e9}"
+    );
+    assert_eq!(VaultPath::parse("/Web/Dup:1").unwrap().format(), "/Web/Dup");
 }
 
 #[test]
