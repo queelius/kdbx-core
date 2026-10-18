@@ -36,6 +36,62 @@ Enabling both keepass features is legal; Cargo builds both versions.
 The library performs no I/O, reads no clock, and builds for
 `wasm32-unknown-unknown` with and without `kdf`.
 
+## Modules
+
+| Module | What it owns |
+|---|---|
+| `model` | `Snapshot`: an owned, serializable, keepass-free image of a database, sealed at capture (`Sealing::Fingerprint` or `Sealing::Reveal`) |
+| `fields` | `StandardField`: the five KDBX standard fields and their traits |
+| `visibility` | `metadata_value`: the one rule for which values may leave the vault (protected values hidden, the Title always visible) |
+| `path` | `VaultPath`: the one path grammar (`/Group/Entry:2`, `/Group/`), parse, format, resolve, `path_of` |
+| `fingerprint` | `FingerprintKey`, `Fingerprint`: keyed HMAC-SHA256 fingerprints; Argon2id-derived stable keys (`kdf`) |
+| `text` | `escape_inline`, `continuation_lines`: rendering that no value can break out of |
+| `otp` | `resolve`, `TotpConfig::code_at`: TOTP from otpauth URIs, KeePass 2 `TimeOtp-*` fields, or the legacy pair |
+| `capture` | `keepass_0_12::capture`, `keepass_0_15::capture`, `otp_fields` |
+
+## Example
+
+```rust
+use kdbx_core::capture::keepass_0_15::capture;
+use kdbx_core::fingerprint::{FingerprintKey, KeyMaterial};
+use kdbx_core::model::Sealing;
+use kdbx_core::path::path_of;
+use kdbx_core::visibility::metadata_value;
+
+let db: keepass_0_15::Database = open_somehow();
+
+// A key stable across processes (feature `kdf`), salted with the root UUID.
+let key = FingerprintKey::derive(
+    &KeyMaterial::new(Some(b"master password"), None),
+    db.root().id().uuid(),
+)?;
+let snap = capture(&db, &Sealing::Fingerprint(&key));
+
+for entry in snap.entries() {
+    let path = path_of(&snap, entry.uuid).map(|p| p.format());
+    let user = metadata_value(entry, "UserName"); // None when protected
+    println!("{path:?} {user:?}");
+}
+```
+
+Protected values never enter `snap` in plaintext: they are fingerprints, and
+`Debug`, serde and every view built on the snapshot can only show those.
+
+## Testing
+
+`tests/corpus/` is a frozen, checksummed conformance corpus (KeePassXC and
+keepass-rs fixtures plus generated vaults) described by `manifest.json` and
+`MANIFEST.md`. Run every gate with:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+cargo test --no-default-features
+cargo build --target wasm32-unknown-unknown --no-default-features
+cargo build --target wasm32-unknown-unknown --no-default-features --features kdf
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

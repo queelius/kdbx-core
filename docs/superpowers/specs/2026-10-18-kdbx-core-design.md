@@ -294,3 +294,55 @@ Independently: the upstream keepass-rs #373 PR (KDBX 4.0 save) awaits the owner'
 
 - The Argon2 parameter set for `FingerprintKey::derive`: 64 MiB / 3 passes matches KeePassXC's default for new databases (to be confirmed against current KeePassXC source before release).
 - Whether `Snapshot` should implement `serde::Serialize` publicly in 0.1 (useful for arkiv-kdbx later) or wait until the shape has settled. Proposal: derive it, but document the serialized shape as unstable until 1.0.
+
+## 9. Decisions made during implementation
+
+Recorded while implementing kdbx-core 0.1 (plan tasks 1 to 11). Each is the
+most principled reading of a point the sections above leave open or get
+slightly wrong.
+
+**Model and sealing (3.1)**
+
+1. **`Sealing::Reveal` carries the key**: `enum Sealing<'k> { Fingerprint(&'k FingerprintKey), Reveal(&'k FingerprintKey) }`. Attachments, binary custom-data values and custom icons are never inlined, so they are fingerprinted under either variant; a unit `Reveal` would have forced either an unkeyed hash (breaking the "fingerprints are keyed" invariant) or inlined bytes. diff-kdbx's `--show-secrets` derives a key anyway.
+2. **Binary custom data stays sealed under `Reveal`**; only text values are revealed. A custom-data item with no value element is captured as an empty string.
+3. **`Sealing` owns the sealing rule** (`field`, `custom_text`, `custom_binary`, `attachment`, `custom_icon`), so every adapter, present or future, applies it identically. The Title exception is `visibility::is_address`, shared with `metadata_value`.
+4. **Fourth fingerprint domain** `kdbx-core/custom-icon/v1`, for `Meta::custom_icons: BTreeMap<Uuid, CustomIconInfo { size, fingerprint, name, modified }>`.
+5. **`Snapshot::deleted_objects`** (the `<DeletedObjects>` tombstones) is part of the image. `Meta` also keeps `generator`, `last_selected_group` and `last_top_visible_group` for fidelity; consumers decide what is noise.
+6. **Faithful optionality**: the seven `Times` values stay `Option` (KDBX can omit them); `quality_check` is a `bool` (absent means on); `Icon::Standard(u32)` saturates the (never seen) out-of-range index.
+7. **Tags use the KDBX tag-list grammar** (`model::parse_tags`, `model::TAG_DELIMITERS`: `;`, `,`, tab; trimmed; empty tags dropped). This also repairs keepass 0.12, which splits `<Tags>` on `,` only.
+8. **No `test-util` feature**: constructors (`Snapshot::new`, `Group::new`, `Entry::new`, `Field::plain`, `with_*` helpers) are always available, which is all a downstream crate needs to build `#[non_exhaustive]` values without keepass.
+9. **`Snapshot::walk` yields `(NodeRef, Option<&Group>)`** (the parent itself rather than its UUID), in pre-order with a group's entries before its child groups.
+
+**Fingerprints (3.5)**
+
+10. **Exact bytes, no NFC**: field fingerprints cover the stored UTF-8 bytes (diff-kdbx 0.2 NFC-normalized first). For a secret, equality must mean byte equality.
+11. **`derive` refuses empty key material** (`KdfError::NoKeyMaterial`): a key derived from no secret would reopen the dictionary oracle. The key file contributes `SHA-256` of its raw bytes. The parameters are public in `fingerprint::kdf_params`; known answers are cross-checked against Python's `hmac` and against rust-argon2.
+12. `Fingerprint` displays its 8-character short form, parses and serializes the 64-character form, and has a public `from_bytes` (so a logged fingerprint can be verified).
+
+**Paths (3.4)**
+
+13. **`VaultPath::format` is exact: group paths keep their trailing `/`** (`/Web/`), the root is `/`. mcp-kdbx's canonical form dropped the slash, which made `parse(format(p)) != p` for group paths and let a group's emitted path re-resolve as an entry. With the slash, every `path_of` result resolves back to its node through the generic `resolve` (property-tested).
+14. **Escapes are strict**: an unknown escape (`\q`) or a bad `\u{...}` is a `PathError::Escape`. mcp-kdbx decoded `\x` to `x`, so `\n` used to mean the letter `n`; it now means a line feed, consistent with `text::escape_inline`.
+15. Typed errors: `PathError` (`MissingLeadingSlash`, `EmptySegment`, `Escape(UnescapeError)`, `ZeroOrdinal`, `OrdinalOverflow`, `EmptyEntryPath`) and `ResolveError` (`GroupNotFound { segment }`, `EntryNotFound`, `GroupShapedPath`, the last being mcp-kdbx's "trailing slash never names an entry" rule, which it reported as `EntryNotFound`).
+16. `Segment` is public with a validating constructor; `VaultPath::{root, group, entry}` build paths; `NodeKind` names group versus entry. Groups and entries have separate ordinal namespaces (as in mcp-kdbx).
+
+**Text (3.6)**
+
+17. **The escape set is Cc, Cf, Zl and Zp**: U+2028 and U+2029 break lines in some renderers, so leaving them would violate "always one printable line". `\u{XXXX}` uses uppercase hex with at least four digits; `unescape_inline` is public and exact.
+
+**OTP (3.7)**
+
+18. **Typed OTP fields**: `otp::OtpField` names the ten OTP-related fields; `capture::*::otp_fields` returns `OtpFields` (a `BTreeMap<OtpField, Zeroizing<String>>` with redacting `Debug`) instead of a `BTreeMap<String, String>`. `resolve(&Entry) -> Result<Option<TotpConfig>, OtpError>` fails with `OtpError::Sealed(field)` rather than guessing; `resolve_fields(&OtpFields)` serves the live-entry path.
+19. **Stricter URIs**: a malformed `period` or `digits` rejects the otpauth URI (mcp-kdbx silently used the default, computing a wrong code). Scheme and type compare case-insensitively; base32 tolerates non-zero trailing bits.
+20. **Leaner dependencies than mcp-kdbx**: RFC 6238 over `hmac` with `sha1`/`sha2` (no totp-lite), `data-encoding` for base32/base64/hex, and an RFC 3986 split plus `form_urlencoded` for the URI (no `url`, whose IDNA tables would land in WASM). `compute_now`/`unix_now` are gone (no clock); `evaluation_time` stays.
+
+**Capture (3.8) and corpus (6)**
+
+21. keepass 0.12 keeps children in a randomized hash set, so its adapter sorts children by UUID (document order is unrecoverable); keepass 0.15 keeps document order.
+22. keepass 0.12 cannot pin UUIDs, so `examples/gen_corpus.rs` builds the vault with keepass 0.15 and fixed UUIDs and has keepass 0.12 re-save it as KDBX 4.0. `tests/corpus/manifest.json` is the typed record the tests read; `MANIFEST.md` is its human-readable twin (the tests check that it mentions every file and checksum).
+23. Both keepass versions are dev-dependencies (with `save_kdbx4`), so tests build keepass even under `--no-default-features`; library users never see them.
+
+**keepass 0.12 limitations found (pinned by tests)**
+
+- It **cannot parse KDBX 4.1 files whose groups carry `<Tags>` or whose records carry `<PreviousParentGroup>`** ("unknown variant"). KeePassXC writes both, so mcp-kdbx and web-kdbx on keepass 0.12 cannot open such vaults today.
+- It ignores `<QualityCheck>` and `<DeletionTime>`, cannot read the KDBX 3.1 fixture with an empty attachment, and drops fields whose value is empty.

@@ -39,6 +39,27 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
 MSRV is 1.89 (keepass 0.15 requires it): `cargo +1.89.0 test --all-features`.
 
+## Tests (as of 0.1.0)
+
+153 with `--all-features`: 114 unit (text, fields, fingerprint incl. 4 `kdf`
+tests, model, visibility, path incl. property tests, otp), 8 + 7 capture
+integration tests (`tests/capture_keepass_0_12.rs`, `tests/capture_keepass_0_15.rs`,
+shared fixture in `tests/common/mod.rs`), 15 corpus tests (`tests/corpus.rs`),
+9 doc tests. `--no-default-features`: 110 unit, 2 corpus checksum tests, 9 doc
+tests.
+
+The corpus (`tests/corpus/`) is bytes only: never edit a file in place.
+`manifest.json` is the typed record the tests read; keep `MANIFEST.md` in step
+(a test checks it mentions every file and checksum). Regenerate the generated
+vaults with `cargo run --example gen_corpus` and update both checksums.
+
+## Known keepass 0.12 limitations (pinned by tests)
+
+It cannot parse KDBX 4.1 group `<Tags>` or `<PreviousParentGroup>`, ignores
+`<QualityCheck>` and `<DeletionTime>`, splits `<Tags>` on `,` only (the adapter
+re-splits), loses child document order (the adapter sorts by UUID), drops
+empty-valued fields, and cannot read the KDBX 3.1 empty-attachment fixture.
+
 ## Conventions
 
 - `#[non_exhaustive]` on every public struct and enum that may grow.

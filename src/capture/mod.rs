@@ -25,6 +25,37 @@
 //! | custom icon name and time | not supported: `None` | captured |
 //!
 //! Default features pull in no keepass.
+//!
+//! ```
+//! # #[cfg(feature = "keepass-0_15")]
+//! # {
+//! use kdbx_core::capture::keepass_0_15::{capture, otp_fields};
+//! use kdbx_core::fingerprint::FingerprintKey;
+//! use kdbx_core::model::Sealing;
+//! use kdbx_core::otp::resolve_fields;
+//! use keepass_0_15::Database;
+//!
+//! let mut db = Database::new();
+//! let id = {
+//!     let mut root = db.root_mut();
+//!     let mut entry = root.add_entry();
+//!     entry.set_unprotected("Title", "Mail");
+//!     entry.set_protected("Password", "hunter2");
+//!     entry.set_protected("otp", "otpauth://totp/m?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+//!     entry.id()
+//! };
+//!
+//! // A per-session random key in real use.
+//! let key = FingerprintKey::from_bytes([7; 32]);
+//! let snap = capture(&db, &Sealing::Fingerprint(&key));
+//! let mail = snap.find_entry(id.uuid()).unwrap();
+//! assert!(mail.field("Password").unwrap().value.is_sealed());
+//!
+//! // OTP still works: read the OTP fields from the live entry.
+//! let config = resolve_fields(&otp_fields(&db.entry(id).unwrap())).unwrap();
+//! assert_eq!(config.code_at(59).code(), "287082");
+//! # }
+//! ```
 
 /// The adapter body shared by every keepass version. `$kp` is the extern
 /// crate name; the invoking module defines the shim functions it calls.
