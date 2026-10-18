@@ -356,6 +356,10 @@ slightly wrong.
 33. **Upstream gaps (keepass keeps the data crate-private; accessor requests for keepass-rs)**: `previous_parent` is read through keepass's `previous_parent()` lookup, which returns `None` when the old parent group no longer exists, so a deleted previous parent's UUID is lost; a group's `LastTopVisibleEntry` is not capturable at all.
 34. **Packaging**: the keepass-rs MIT license text ships as `tests/corpus/LICENSE-keepass-rs` and is referenced from the manifest; the package excludes `docs/superpowers/` and `proptest-regressions/`; CI runs `cargo publish --dry-run`.
 
+**WASM size follow-up (web-kdbx adoption)**
+
+35. **No general-purpose tables in the library**: `text::needs_escape` uses a 23-range table of the Cc/Cf/Zl/Zp code points (Unicode 17.0.0, `ESCAPE_TABLE_UNICODE_VERSION`), checked against `unicode-properties` (now a dev-dependency) for every code point; and the crate's own RFC 4648 codecs (hex, base32, base64, in the private `codec` module) replace `data-encoding` (now a dev-dependency for differential tests). A release wasm32 size probe (no default features, opt-level s, LTO) went from 146,412 to 105,494 bytes (escape table) to 61,261 bytes (codecs). `unicode-normalization` stays: NFC is what makes ordinals identical across members. Base64 secrets now decode with or without padding.
+
 **keepass 0.12 limitations found (pinned by tests)**
 
 - It **cannot parse KDBX 4.1 files whose groups carry `<Tags>` or whose records carry `<PreviousParentGroup>`** ("unknown variant"). KeePassXC writes both, so mcp-kdbx and web-kdbx on keepass 0.12 cannot open such vaults today.

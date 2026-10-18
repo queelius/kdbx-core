@@ -45,12 +45,16 @@ MSRV is 1.89 (keepass 0.15 requires it): `cargo +1.89.0 test --all-features`.
 
 ## Tests (as of 0.1.0)
 
-177 with `--all-features`: 132 unit (text, fields, fingerprint incl. 6 `kdf`
-tests, model, visibility, path incl. property tests and the PathIndex bulk
-test, otp), 8 + 8 capture integration tests (`tests/capture_keepass_0_12.rs`,
+187 with `--all-features`: 142 unit (text incl. the exhaustive escape-table
+check, codec, fields, fingerprint incl. 6 `kdf` tests, model, visibility,
+path incl. property tests and the PathIndex bulk test, otp), 8 + 8 capture
+integration tests (`tests/capture_keepass_0_12.rs`,
 `tests/capture_keepass_0_15.rs`, shared fixture in `tests/common/mod.rs`), 18
-corpus tests (`tests/corpus.rs`), 11 doc tests. `--no-default-features`: 126
+corpus tests (`tests/corpus.rs`), 11 doc tests. `--no-default-features`: 136
 unit, 3 corpus tests (checksums, manifest, license), 11 doc tests.
+
+Keep the library free of general-purpose tables (WASM size): escaping uses
+`text::ESCAPE_RANGES`, decoding uses the private `codec` module.
 
 The corpus (`tests/corpus/`) is bytes only: never edit a file in place.
 `manifest.json` is the typed record the tests read; keep `MANIFEST.md` in step

@@ -1176,9 +1176,7 @@ impl FromStr for Rgb {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let hex = s.strip_prefix('#').ok_or(ParseRgbError)?;
-        let bytes = data_encoding::HEXLOWER_PERMISSIVE
-            .decode(hex.as_bytes())
-            .map_err(|_| ParseRgbError)?;
+        let bytes = crate::codec::hex_decode(hex).ok_or(ParseRgbError)?;
         match bytes.as_slice() {
             [r, g, b] => Ok(Rgb {
                 r: *r,

@@ -42,7 +42,6 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
-use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Sha256;
@@ -153,13 +152,13 @@ impl Fingerprint {
 
     /// All 64 lowercase hex characters.
     pub fn to_hex(&self) -> String {
-        HEXLOWER.encode(&self.0)
+        crate::codec::hex_encode(&self.0)
     }
 
     /// The first 8 lowercase hex characters, for display only. Never compare
     /// fingerprints by their short form.
     pub fn short(&self) -> String {
-        HEXLOWER.encode(&self.0[..Self::SHORT_LEN / 2])
+        crate::codec::hex_encode(&self.0[..Self::SHORT_LEN / 2])
     }
 }
 
@@ -207,9 +206,7 @@ impl FromStr for Fingerprint {
     type Err = ParseFingerprintError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bytes = HEXLOWER_PERMISSIVE
-            .decode(s.as_bytes())
-            .map_err(|_| ParseFingerprintError)?;
+        let bytes = crate::codec::hex_decode(s).ok_or(ParseFingerprintError)?;
         let bytes: [u8; 32] = bytes.try_into().map_err(|_| ParseFingerprintError)?;
         Ok(Fingerprint(bytes))
     }
@@ -780,7 +777,7 @@ mod tests {
             let reference = reference_key_bytes(Some(b"test-password-do-not-use"), None, &params);
             assert_eq!(key_bytes(&key).as_slice(), reference.as_slice());
             // Pinned so the v1 format can never drift silently.
-            assert_eq!(HEXLOWER.encode(key_bytes(&key)), PINNED_FLOOR);
+            assert_eq!(crate::codec::hex_encode(key_bytes(&key)), PINNED_FLOOR);
             assert_eq!(
                 key.fingerprint(Domain::Field, b"1234").to_hex(),
                 PINNED_FLOOR_PIN_FINGERPRINT
@@ -794,7 +791,7 @@ mod tests {
             let key = FingerprintKey::derive(&material, SALT, &params).unwrap();
             let reference = reference_key_bytes(Some(b"test-password-do-not-use"), None, &params);
             assert_eq!(key_bytes(&key).as_slice(), reference.as_slice());
-            assert_eq!(HEXLOWER.encode(key_bytes(&key)), PINNED_M96_T4_P2);
+            assert_eq!(crate::codec::hex_encode(key_bytes(&key)), PINNED_M96_T4_P2);
         }
 
         #[test]

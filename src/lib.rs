@@ -20,6 +20,7 @@
 #![warn(missing_docs)]
 
 pub mod capture;
+mod codec;
 pub mod fields;
 pub mod fingerprint;
 pub mod model;

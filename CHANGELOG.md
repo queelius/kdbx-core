@@ -36,4 +36,13 @@ All notable changes to this crate are documented here. The format follows
 - `visibility::is_secret`, the one predicate behind sealing and visibility
   (an unprotected Password is still a secret).
 - `path::PathIndex` for computing every path in one pass.
-- Steam Guard TOTP codes and typed `OtpError::Malformed` errors.
+- Steam Guard TOTP codes and typed `OtpError::Malformed` errors, with
+  human-readable Display and serde for `OtpError`, `OtpSource` and
+  `MalformedReason`.
+- serde for `FieldTraits`.
+
+### Changed
+
+- Smaller WASM: a compact Cc/Cf/Zl/Zp table replaces the
+  `unicode-properties` lookup, and built-in hex/base32/base64 decoders replace
+  `data-encoding` (both now dev-dependencies only).

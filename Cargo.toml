@@ -45,9 +45,6 @@ subtle = { version = "2", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # NFC normalization for path-name comparison.
 unicode-normalization = { version = "0.1", default-features = false, features = ["std"] }
-# base32 (otpauth secrets), base64 and hex (KeePass TimeOtp-* secrets, and
-# fingerprint hex). One dependency-free crate instead of three.
-data-encoding = { version = "2", default-features = false, features = ["alloc"] }
 # Percent-decoding of the otpauth:// query string. The url crate would pull
 # IDNA tables into WASM for a URI whose authority is the literal "totp".
 form_urlencoded = { version = "1", default-features = false, features = ["alloc"] }
@@ -58,6 +55,8 @@ keepass_0_12 = { package = "keepass", version = "0.12.9", optional = true, defau
 keepass_0_15 = { package = "keepass", version = "0.15.3", optional = true, default-features = false }
 
 [dev-dependencies]
+# Reference encoder for the differential tests of the crate's own codecs.
+data-encoding = "2"
 # Ground truth for text::ESCAPE_RANGES: a test checks the compact table
 # against this General_Category lookup for every code point. Only a
 # dev-dependency, so its full property table stays out of WASM builds.

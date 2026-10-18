@@ -39,9 +39,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::LazyLock;
 
-use data_encoding::{BASE64, Encoding, HEXLOWER_PERMISSIVE, Specification};
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -533,11 +531,11 @@ impl TotpConfig {
         let decoders: [(OtpField, SecretDecoder); 4] = [
             (OtpField::NativeSecret, |v| Some(v.as_bytes().to_vec())),
             (OtpField::NativeSecretHex, |v| {
-                HEXLOWER_PERMISSIVE.decode(compact(v).as_bytes()).ok()
+                crate::codec::hex_decode(&compact(v))
             }),
             (OtpField::NativeSecretBase32, decode_base32_secret),
             (OtpField::NativeSecretBase64, |v| {
-                BASE64.decode(compact(v).as_bytes()).ok()
+                crate::codec::base64_decode(v)
             }),
         ];
         let mut present = decoders.iter().filter_map(|(field, decode)| {
@@ -725,31 +723,16 @@ impl fmt::Debug for TotpCode {
 /// Decodes one encoding of a KeePass native TOTP secret field.
 type SecretDecoder = fn(&str) -> Option<Vec<u8>>;
 
-/// RFC 4648 base32 without padding, tolerating non-zero trailing bits (some
-/// generators leave them set).
-static BASE32_LENIENT: LazyLock<Encoding> = LazyLock::new(|| {
-    let mut spec = Specification::new();
-    spec.symbols.push_str("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567");
-    spec.check_trailing_bits = false;
-    spec.encoding()
-        .unwrap_or_else(|_| unreachable!("a valid base32 specification"))
-});
-
 /// `s` without any whitespace.
 fn compact(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// Decode a base32 secret after normalizing it: whitespace removed, letters
-/// uppercased, trailing `=` padding dropped. Secrets arrive lowercase, grouped
-/// in blocks of four, or padded, and a strict decoder rejects all three.
+/// Decode a base32 secret. Secrets arrive lowercase, grouped in blocks of
+/// four, or padded; the decoder ignores case, whitespace and trailing padding.
 /// Empty secrets are rejected.
 fn decode_base32_secret(s: &str) -> Option<Vec<u8>> {
-    let normalized = compact(s).to_ascii_uppercase();
-    let bytes = BASE32_LENIENT
-        .decode(normalized.trim_end_matches('=').as_bytes())
-        .ok()?;
-    (!bytes.is_empty()).then_some(bytes)
+    crate::codec::base32_decode(s).filter(|bytes| !bytes.is_empty())
 }
 
 /// An otpauth `algorithm` value, case-insensitively.
