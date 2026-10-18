@@ -33,10 +33,12 @@ pub const T0: i64 = 1_767_258_000;
 pub const DAY: i64 = 86_400;
 
 /// Every plaintext that must never appear in a fingerprint-sealed capture.
+/// Each contains a character outside `[0-9a-f]`, so none can occur by chance
+/// inside the hex fingerprints of the serialized snapshot.
 pub const SECRETS: &[&str] = &[
     "hunter2",
     "alice-protected",
-    "1234",
+    "pin-zq-4821",
     "old-password-1",
     "old-password-2",
     "vpn-secret",
@@ -195,7 +197,7 @@ pub fn rich_db_with(extras: Kdbx41Extras) -> (kp::Database, Uuid) {
         bank.set_protected("Password", "hunter2");
         bank.set_unprotected("URL", "https://bank.example");
         bank.set_unprotected("Notes", "line one\nline two");
-        bank.set_protected("PIN", "1234");
+        bank.set_protected("PIN", "pin-zq-4821");
         bank.tags = vec!["money".into(), "finance".into()];
     }
     // History: two earlier versions differing in their password, cloned
@@ -319,7 +321,7 @@ pub fn expected(sealing: &Sealing<'_>, icon: Uuid) -> Snapshot {
             ("Password", true, password),
             ("URL", false, "https://bank.example"),
             ("Notes", false, "line one\nline two"),
-            ("PIN", true, "1234"),
+            ("PIN", true, "pin-zq-4821"),
         ]
         .into_iter()
         .map(|(name, protected, value)| (name.to_owned(), sealing.field(name, protected, value)))
@@ -435,6 +437,12 @@ pub fn without_kdbx41_extras(mut snap: Snapshot) -> Snapshot {
 
 /// Assert no secret plaintext appears anywhere in the serialized snapshot.
 pub fn assert_no_secrets(snap: &Snapshot) {
+    for secret in SECRETS {
+        assert!(
+            !secret.chars().all(|c| c.is_ascii_hexdigit()),
+            "{secret:?} could match inside a hex fingerprint"
+        );
+    }
     let json = serde_json::to_string(snap).expect("serializes");
     for secret in SECRETS {
         assert!(
