@@ -7,7 +7,8 @@
 //!
 //! **Sealing happens at capture.** A [`Sealing`] decides once, structurally,
 //! what plaintext a snapshot may hold. Under [`Sealing::Fingerprint`] every
-//! protected field value (except the Title), every custom-data value, every
+//! secret field value ([`crate::visibility::is_secret`]: protected or a
+//! Password, never the Title), every custom-data value, every
 //! attachment's content and every custom icon becomes a keyed
 //! [`Fingerprint`]; the plaintext is never copied in, so nothing downstream
 //! can leak it by mistake. [`Sealing::Reveal`] is the only way plaintext
@@ -190,7 +191,11 @@ pub struct GroupFlags {
 }
 
 /// An entry (a credential record).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` redacts the plaintext of every secret field
+/// ([`crate::visibility::is_secret`]), so a `Reveal` snapshot does not print
+/// secrets through `Debug`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Entry {
     /// Record identity (history items share their entry's UUID).
@@ -226,7 +231,11 @@ pub struct Entry {
 }
 
 /// One entry field: its KDBX protection flag and its (possibly sealed) value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` redacts a plaintext value whose protection flag is set (a bare
+/// field does not know its name; [`Entry`]'s `Debug` applies the full
+/// name-aware rule).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Field {
     /// The stored KDBX protection flag.
@@ -374,8 +383,8 @@ pub struct AutoTypeAssociation {
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum Sealing<'k> {
-    /// Seal every protected field value except the Title, every custom-data
-    /// value, and all binary content.
+    /// Seal every secret field value (protected or a Password, never the
+    /// Title), every custom-data value, and all binary content.
     Fingerprint(&'k FingerprintKey),
     /// Keep text values in plaintext (for `--show-secrets`). Binary content is
     /// still fingerprinted.
@@ -766,6 +775,75 @@ impl<'a> NodeRef<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// Debug without secrets.
+
+/// Stands in for a redacted plaintext in `Debug` output.
+const REDACTED: &str = "<redacted>";
+
+/// A field rendered for `Debug`, with its plaintext hidden when `secret`.
+struct FieldDebug<'a> {
+    field: &'a Field,
+    secret: bool,
+}
+
+impl fmt::Debug for FieldDebug<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s = f.debug_struct("Field");
+        s.field("protected", &self.field.protected);
+        match &self.field.value {
+            Value::Plain(_) if self.secret => s.field("value", &format_args!("Plain({REDACTED})")),
+            value => s.field("value", value),
+        };
+        s.finish()
+    }
+}
+
+impl fmt::Debug for Field {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        FieldDebug {
+            field: self,
+            secret: self.protected,
+        }
+        .fmt(f)
+    }
+}
+
+/// An entry's fields rendered for `Debug` with the name-aware secret rule.
+struct FieldsDebug<'a>(&'a BTreeMap<String, Field>);
+
+impl fmt::Debug for FieldsDebug<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(self.0.iter().map(|(name, field)| {
+                let secret = crate::visibility::is_secret(name, field.protected);
+                (name, FieldDebug { field, secret })
+            }))
+            .finish()
+    }
+}
+
+impl fmt::Debug for Entry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Entry")
+            .field("uuid", &self.uuid)
+            .field("fields", &FieldsDebug(&self.fields))
+            .field("tags", &self.tags)
+            .field("attachments", &self.attachments)
+            .field("times", &self.times)
+            .field("icon", &self.icon)
+            .field("foreground", &self.foreground)
+            .field("background", &self.background)
+            .field("override_url", &self.override_url)
+            .field("quality_check", &self.quality_check)
+            .field("autotype", &self.autotype)
+            .field("custom_data", &self.custom_data)
+            .field("previous_parent", &self.previous_parent)
+            .field("history", &self.history)
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sealing: the one place that decides what plaintext a snapshot holds.
 
 impl<'k> Sealing<'k> {
@@ -783,11 +861,12 @@ impl<'k> Sealing<'k> {
 
     /// The snapshot form of the entry field `name` holding `plaintext`.
     ///
-    /// Sealed exactly when sealing (not revealing), the field is protected,
-    /// and it is not the Title: a Title is an address, never a secret, so it
-    /// stays plain even when its protection flag is set (the flag is kept).
+    /// Sealed exactly when sealing (not revealing) and the field is a secret
+    /// per [`crate::visibility::is_secret`]: protected or a Password, and never
+    /// the Title (an address, kept plain even when its flag is set). The
+    /// protection flag is always kept as metadata.
     pub fn field(&self, name: &str, protected: bool, plaintext: &str) -> Field {
-        let value = if protected && !crate::visibility::is_address(name) && !self.reveals() {
+        let value = if !self.reveals() && crate::visibility::is_secret(name, protected) {
             Value::Sealed(self.key().fingerprint(Domain::Field, plaintext.as_bytes()))
         } else {
             Value::Plain(plaintext.to_owned())
@@ -1104,6 +1183,29 @@ mod tests {
         assert_eq!(title.value, Value::Plain("Bank".into()));
         let pin = s.field("PIN", true, "1234");
         assert!(pin.value.is_sealed());
+    }
+
+    #[test]
+    fn debug_of_a_revealed_entry_redacts_secrets() {
+        let key = key();
+        let s = Sealing::Reveal(&key);
+        let entry = Entry::new(id(1))
+            .with_field("Title", s.field("Title", true, "Bank-title"))
+            .with_field("Password", s.field("Password", false, "hunter2-zq"))
+            .with_field("PIN", s.field("PIN", true, "pin-zq-4821"))
+            .with_field("UserName", s.field("UserName", false, "alice-zq"));
+        let shown = format!("{entry:?}");
+        assert!(!shown.contains("hunter2-zq"), "{shown}");
+        assert!(!shown.contains("pin-zq-4821"), "{shown}");
+        assert!(
+            shown.contains("Bank-title") && shown.contains("alice-zq"),
+            "{shown}"
+        );
+        // A bare Field cannot know its name, so it redacts any protected
+        // plaintext.
+        let field = s.field("PIN", true, "pin-zq-4821");
+        assert!(!format!("{field:?}").contains("pin-zq-4821"));
+        assert!(format!("{:?}", s.field("URL", false, "u-zq")).contains("u-zq"));
     }
 
     #[test]

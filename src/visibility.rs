@@ -1,23 +1,21 @@
-//! The one rule for which field values may leave the vault as metadata.
+//! The one rule for which field values are secrets.
 //!
-//! KDBX protection is a per-field flag, not a property of the field's name:
-//! the Password is protected by default, but KeePassXC and KeePass 2 can
-//! protect any field. So "is this value a secret" is answered from the stored
-//! flag, never from a list of names.
+//! [`is_secret`] decides, for a field's name and stored KDBX protection flag,
+//! whether its value is a secret. Both consumers of that question use it:
 //!
-//! Every member uses [`metadata_value`] both for the values it displays and
-//! for the values it searches, so a value is searchable exactly when it is
-//! visible: search can never become an oracle on a hidden value.
+//! - **sealing** ([`Sealing::field`](crate::model::Sealing::field)) seals
+//!   exactly the secret fields under fingerprint sealing, and
+//! - **visibility** ([`metadata_value`]) exposes exactly the non-secret ones,
 //!
-//! The one exception is the Title. It is the entry's address in a vault path,
-//! and every member already exposes paths, so hiding a protected Title would
-//! protect nothing. It is reported as metadata regardless of its flag.
+//! so the two can never disagree. Every member also searches through
+//! [`metadata_value`], so a value is searchable exactly when it is visible.
 //!
-//! Under [`Sealing::Fingerprint`](crate::model::Sealing::Fingerprint) the rule
-//! holds structurally (sealed values have no text). The flag check makes it
-//! hold for [`Sealing::Reveal`](crate::model::Sealing::Reveal) snapshots too,
-//! so a revealed snapshot used for display still hides protected values unless
-//! a caller reveals one explicitly.
+//! A field is secret when it is protected, or when its name is protected by
+//! default ([`FieldTraits::protected_by_default`](crate::fields::FieldTraits),
+//! that is the Password): turning off a Password's protection flag does not
+//! make it metadata. The one exception is the Title. It is the entry's address
+//! in a vault path, and every member already exposes paths, so hiding a
+//! protected Title would protect nothing; it is never a secret.
 //!
 //! ```
 //! use kdbx_core::model::{Entry, Field, Value};
@@ -31,7 +29,7 @@
 //! assert_eq!(metadata_value(&entry, "UserName"), None);
 //! ```
 
-use crate::fields::StandardField;
+use crate::fields::{StandardField, traits_of};
 use crate::model::{Entry, Field};
 
 /// Whether field `name` is the entry's address (the Title), the one field
@@ -40,10 +38,22 @@ pub fn is_address(name: &str) -> bool {
     StandardField::from_kdbx_name(name) == Some(StandardField::Title)
 }
 
+/// Whether the field stored under `name`, with KDBX protection flag
+/// `protected`, holds a secret:
+///
+/// ```text
+/// is_secret = name != Title && (protected || traits_of(name).protected_by_default)
+/// ```
+///
+/// The single predicate behind both sealing and visibility.
+pub fn is_secret(name: &str, protected: bool) -> bool {
+    !is_address(name) && (protected || traits_of(name).protected_by_default)
+}
+
 /// Whether field `name` holding `field` may be exposed as metadata: its value
-/// is plain, and it is either unprotected or the Title.
+/// is plain and it is not a secret ([`is_secret`]).
 pub fn is_visible(field: &Field, name: &str) -> bool {
-    field.value.as_plain().is_some() && (!field.protected || is_address(name))
+    field.value.as_plain().is_some() && !is_secret(name, field.protected)
 }
 
 /// The plaintext of field `name` when it may be exposed as metadata (see
@@ -71,6 +81,47 @@ mod tests {
             .fold(Entry::new(Uuid::nil()), |e, (name, value, protected)| {
                 e.with_field(*name, sealing.field(name, *protected, value))
             })
+    }
+
+    #[test]
+    fn unprotected_password_is_still_a_secret() {
+        // Turning off a Password's protection flag does not make it metadata:
+        // the Password is protected by default (FieldTraits), and sealing and
+        // visibility share the one is_secret predicate.
+        let key = FingerprintKey::from_bytes([1; 32]);
+        assert!(is_secret("Password", false));
+        let sealed = entry(
+            Sealing::Fingerprint(&key),
+            &[("Password", "hunter2", false)],
+        );
+        assert!(sealed.field("Password").unwrap().value.is_sealed());
+        assert!(
+            !sealed.field("Password").unwrap().protected,
+            "the flag is kept"
+        );
+        assert_eq!(metadata_value(&sealed, "Password"), None);
+        let revealed = entry(Sealing::Reveal(&key), &[("Password", "hunter2", false)]);
+        assert_eq!(
+            revealed.field("Password").unwrap().value.as_plain(),
+            Some("hunter2")
+        );
+        assert_eq!(metadata_value(&revealed, "Password"), None);
+    }
+
+    #[test]
+    fn is_secret_truth_table() {
+        assert!(!is_secret("Title", true));
+        assert!(!is_secret("Title", false));
+        assert!(is_secret("Password", false));
+        assert!(is_secret("Password", true));
+        assert!(is_secret("PIN", true));
+        assert!(!is_secret("PIN", false));
+        assert!(!is_secret("UserName", false));
+        assert!(is_secret("UserName", true));
+        assert!(
+            is_secret("title", true),
+            "only the exact Title is an address"
+        );
     }
 
     #[test]

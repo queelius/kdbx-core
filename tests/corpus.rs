@@ -139,8 +139,9 @@ fn key() -> FingerprintKey {
 }
 
 /// Checks every adapter must pass on every vault it can read: the format
-/// version matches the manifest, every protected non-Title field is sealed to
-/// the fingerprint of its revealed plaintext, and the Title is never sealed.
+/// version matches the manifest, every secret field (`visibility::is_secret`)
+/// is sealed to the fingerprint of its revealed plaintext, and no other field
+/// is sealed.
 fn check_capture(f: &CorpusFile, sealed: &Snapshot, revealed: &Snapshot, key: &FingerprintKey) {
     assert_eq!(Some(sealed.format), f.kdbx_version, "{}", f.file);
     for (s, r) in sealed.entries().zip(revealed.entries()) {
@@ -149,7 +150,10 @@ fn check_capture(f: &CorpusFile, sealed: &Snapshot, revealed: &Snapshot, key: &F
         for (s, r) in items {
             for (name, field) in &s.fields {
                 let plain = r.fields[name].value.as_plain().expect("revealed");
-                match (&field.value, field.protected && name != "Title") {
+                match (
+                    &field.value,
+                    kdbx_core::visibility::is_secret(name, field.protected),
+                ) {
                     (Value::Sealed(fp), true) => {
                         assert_eq!(*fp, key.fingerprint(Domain::Field, plain.as_bytes()));
                     }
