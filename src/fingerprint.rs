@@ -399,6 +399,71 @@ impl fmt::Display for DeriveParams {
     }
 }
 
+/// Parses the recorded form printed by `Display`:
+/// `argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>`, exactly. Parameters below the
+/// floor are refused (no fingerprint is ever derived with them), so a
+/// recorded value can be used to reproduce a fingerprint, never to weaken one.
+///
+/// ```
+/// use kdbx_core::fingerprint::DeriveParams;
+///
+/// let p: DeriveParams = DeriveParams::FLOOR.to_string().parse().unwrap();
+/// assert_eq!(p, DeriveParams::FLOOR);
+/// assert!("argon2id$v=19$m=8,t=1,p=1".parse::<DeriveParams>().is_err());
+/// ```
+impl FromStr for DeriveParams {
+    type Err = ParseDeriveParamsError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let rest = s
+            .strip_prefix("argon2id$v=19$")
+            .ok_or(ParseDeriveParamsError::Malformed)?;
+        let mut parts = rest.split(',');
+        let mut component = |name: &str| {
+            parts
+                .next()
+                .and_then(|part| part.strip_prefix(name))
+                .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|digits| digits.parse::<u32>().ok())
+                .ok_or(ParseDeriveParamsError::Malformed)
+        };
+        let (memory_kib, iterations, lanes) =
+            (component("m=")?, component("t=")?, component("p=")?);
+        if parts.next().is_some() {
+            return Err(ParseDeriveParamsError::Malformed);
+        }
+        DeriveParams::try_from(DeriveParamsRepr {
+            memory_kib,
+            iterations,
+            lanes,
+        })
+        .map_err(|BelowFloorError| ParseDeriveParamsError::BelowFloor)
+    }
+}
+
+/// Why a string did not parse as [`DeriveParams`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ParseDeriveParamsError {
+    /// Not exactly `argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>`.
+    Malformed,
+    /// Well-formed, but cheaper than the floor (or zero lanes).
+    BelowFloor,
+}
+
+impl fmt::Display for ParseDeriveParamsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseDeriveParamsError::Malformed => {
+                f.write_str("expected argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>")
+            }
+            ParseDeriveParamsError::BelowFloor => BelowFloorError.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ParseDeriveParamsError {}
+
 /// The error of deserializing [`DeriveParams`] cheaper than the floor (or with
 /// zero lanes).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -553,6 +618,43 @@ impl FingerprintKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derive_params_parse_their_display_form_and_refuse_weaker() {
+        for p in [
+            DeriveParams::FLOOR,
+            DeriveParams::new(98_304, 4, 2),
+            DeriveParams::new(1_048_576, 2, 8),
+        ] {
+            assert_eq!(p.to_string().parse::<DeriveParams>(), Ok(p));
+        }
+        for malformed in [
+            "",
+            "argon2id$v=19$m=65536,t=3",
+            "argon2id$v=19$m=65536,t=3,p=1,x=2",
+            "argon2id$v=19$t=3,m=65536,p=1",
+            "argon2d$v=19$m=65536,t=3,p=1",
+            "argon2id$v=19$m=+65536,t=3,p=1",
+            "argon2id$v=19$m=65536,t=3,p=",
+            "argon2id$v=19$m=99999999999,t=3,p=1",
+        ] {
+            assert_eq!(
+                malformed.parse::<DeriveParams>(),
+                Err(ParseDeriveParamsError::Malformed),
+                "{malformed:?}"
+            );
+        }
+        for weaker in [
+            "argon2id$v=19$m=1024,t=50,p=4",
+            "argon2id$v=19$m=65536,t=3,p=0",
+        ] {
+            assert_eq!(
+                weaker.parse::<DeriveParams>(),
+                Err(ParseDeriveParamsError::BelowFloor),
+                "{weaker:?}"
+            );
+        }
+    }
 
     fn test_key() -> FingerprintKey {
         let mut bytes = [0u8; 32];
