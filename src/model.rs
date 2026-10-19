@@ -37,7 +37,7 @@
 //! assert_eq!(snap.walk().count(), 2);
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::str::FromStr;
 
@@ -669,6 +669,81 @@ impl Snapshot {
     }
 }
 
+/// Constant-time lookup of a snapshot's nodes and their parents.
+///
+/// [`Snapshot::find`] and [`Snapshot::parent_of`] walk the tree on every
+/// call, which is fine for one lookup and quadratic for many (a search that
+/// needs each match's group, a listing). A `NodeIndex` walks once and then
+/// answers both in constant time. It agrees with them exactly: history items
+/// are not indexed, and if a malformed snapshot repeats a UUID, the first node
+/// in [`Snapshot::walk`] order wins (as in [`crate::path::PathIndex`]).
+///
+/// ```
+/// use kdbx_core::model::{Entry, FormatVersion, Group, Meta, NodeIndex, Snapshot};
+/// use uuid::Uuid;
+///
+/// let root = Group::new(Uuid::from_u128(1), "Root")
+///     .with_group(Group::new(Uuid::from_u128(2), "Web").with_entry(Entry::new(Uuid::from_u128(3))));
+/// let snap = Snapshot::new(FormatVersion::KDBX_4_1, Meta::default(), root);
+/// let index = NodeIndex::new(&snap);
+/// assert_eq!(index.parent(Uuid::from_u128(3)).map(|g| g.uuid), Some(Uuid::from_u128(2)));
+/// assert!(index.entry(Uuid::from_u128(3)).is_some());
+/// assert!(index.parent(Uuid::from_u128(1)).is_none());
+/// ```
+#[derive(Debug, Clone)]
+pub struct NodeIndex<'a> {
+    nodes: HashMap<Uuid, (NodeRef<'a>, Option<&'a Group>)>,
+}
+
+impl<'a> NodeIndex<'a> {
+    /// Index every group and entry of `snap` (one walk).
+    pub fn new(snap: &'a Snapshot) -> Self {
+        let mut nodes = HashMap::new();
+        for (node, parent) in snap.walk() {
+            nodes.entry(node.uuid()).or_insert((node, parent));
+        }
+        NodeIndex { nodes }
+    }
+
+    /// The group or entry with `uuid`, if any.
+    pub fn get(&self, uuid: Uuid) -> Option<NodeRef<'a>> {
+        self.nodes.get(&uuid).map(|(node, _)| *node)
+    }
+
+    /// The group with `uuid`, if any.
+    pub fn group(&self, uuid: Uuid) -> Option<&'a Group> {
+        match self.get(uuid)? {
+            NodeRef::Group(g) => Some(g),
+            NodeRef::Entry(_) => None,
+        }
+    }
+
+    /// The entry with `uuid`, if any.
+    pub fn entry(&self, uuid: Uuid) -> Option<&'a Entry> {
+        match self.get(uuid)? {
+            NodeRef::Entry(e) => Some(e),
+            NodeRef::Group(_) => None,
+        }
+    }
+
+    /// The group containing the node with `uuid` (`None` for the root and for
+    /// unknown UUIDs).
+    pub fn parent(&self, uuid: Uuid) -> Option<&'a Group> {
+        self.nodes.get(&uuid).and_then(|(_, parent)| *parent)
+    }
+
+    /// Number of indexed nodes.
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Whether no node is indexed (never true for a snapshot: the root is
+    /// always indexed).
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+}
+
 /// Iterator returned by [`Snapshot::walk`].
 #[derive(Debug, Clone)]
 pub struct Walk<'a> {
@@ -1209,6 +1284,68 @@ impl<'de> Deserialize<'de> for Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tree with nesting, a duplicated UUID (a malformed snapshot), and a
+    /// history item whose UUID matches a live entry.
+    fn index_fixture() -> Snapshot {
+        let u = Uuid::from_u128;
+        let mut live = Entry::new(u(10)).with_field("Title", Field::plain("Live"));
+        live.history = vec![Entry::new(u(10))];
+        let root = Group::new(u(1), "Root")
+            .with_entry(live)
+            .with_group(
+                Group::new(u(2), "A")
+                    .with_entry(Entry::new(u(20)))
+                    .with_group(Group::new(u(3), "B").with_entry(Entry::new(u(30)))),
+            )
+            // Duplicate of u(20) later in walk order: the first one wins.
+            .with_group(Group::new(u(4), "C").with_entry(Entry::new(u(20))));
+        Snapshot::new(FormatVersion::KDBX_4_1, Meta::default(), root)
+    }
+
+    #[test]
+    fn node_index_agrees_with_find_and_parent_of() {
+        let snap = index_fixture();
+        let index = NodeIndex::new(&snap);
+        for n in [0u128, 1, 2, 3, 4, 10, 20, 30, 99] {
+            let uuid = Uuid::from_u128(n);
+            assert_eq!(index.get(uuid), snap.find(uuid), "find {n}");
+            assert_eq!(
+                index.parent(uuid).map(|g| g.uuid),
+                snap.parent_of(uuid).map(|g| g.uuid),
+                "parent_of {n}"
+            );
+            assert_eq!(index.entry(uuid), snap.find_entry(uuid), "find_entry {n}");
+            assert_eq!(index.group(uuid), snap.find_group(uuid), "find_group {n}");
+        }
+        // The duplicated entry resolves to the first in walk order (under A).
+        assert_eq!(
+            index.parent(Uuid::from_u128(20)).map(|g| g.uuid),
+            Some(Uuid::from_u128(2))
+        );
+        // Nodes: 4 groups (root, A, B, C) and 3 distinct entries (10, 20, 30);
+        // the duplicate 20 and the history item are not indexed separately.
+        assert_eq!(index.len(), 7);
+        assert!(!index.is_empty());
+    }
+
+    #[test]
+    fn node_index_is_linear_for_many_lookups() {
+        let mut group = Group::new(Uuid::from_u128(1), "Root");
+        for n in 0..20_000u128 {
+            group = group.with_entry(Entry::new(Uuid::from_u128(1_000 + n)));
+        }
+        let snap = Snapshot::new(FormatVersion::KDBX_4_1, Meta::default(), group);
+        let start = std::time::Instant::now();
+        let index = NodeIndex::new(&snap);
+        let found = (0..20_000u128)
+            .filter(|n| index.parent(Uuid::from_u128(1_000 + n)).is_some())
+            .count();
+        assert_eq!(found, 20_000);
+        // 20,000 parent lookups through Snapshot::parent_of would be ~2e8 node
+        // visits; the index keeps this far under a second even in debug builds.
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
 
     fn id(n: u128) -> Uuid {
         Uuid::from_u128(n)
