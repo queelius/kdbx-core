@@ -154,6 +154,8 @@ Equality between fingerprints uses all 32 bytes; only display truncates. Domains
 
 The cost is one extra Argon2 run per process that needs stable fingerprints (diff-kdbx CLI per opened file; mcp-kdbx once per unlock). Uses that only compare within one process (mcp-kdbx's stage diff) use `from_bytes` with a random key and pay nothing.
 
+**Who may see a derived-key fingerprint.** A derived-key fingerprint together with its plaintext lets its holder test master-password guesses offline, at the vault's own KDF cost (never cheaper, by the `DeriveParams` floor). That grants nothing to someone who already holds the vault file, and grants an offline attack to someone who does not. Rule for every member: derived-key fingerprints go only where the vault file already is, or into records protected like the vault (git history beside the vault for diff-kdbx's textconv; mcp-kdbx's audit log, documented as vault-sensitive). Fingerprints shown to anyone else (an MCP client, a browser page) use a random per-session key (`FingerprintKey::from_bytes` over fresh randomness), which identifies values within a session and is useless for guessing. (Recorded 2026-10-18 after a security review of mcp-kdbx's adoption.)
+
 Known trade-off, documented: when the master password changes between two commits, every sealed value's fingerprint changes in textconv output. diff-kdbx's `compute` mode reports this precisely anyway (it sees the `master_key_changed` meta time move).
 
 `kdf` is a default feature; web-kdbx can disable it (it shows no fingerprints) to keep `argon2` out of its WASM.
