@@ -223,6 +223,37 @@ pub struct FormatVersion {
     pub minor: u16,
 }
 
+/// Whether a keepass version can save a database of some format, and whether
+/// the save keeps everything the file held. Each keepass adapter reports it
+/// for an opened database (`capture::keepass_0_12::save_support`,
+/// `capture::keepass_0_15::save_support`), so writers share one rule and it
+/// changes with the adapter feature they build against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SaveSupport {
+    /// Saving keeps everything the file holds.
+    Lossless,
+    /// keepass writes this format, but may drop data the format holds that
+    /// it does not read (keepass 0.12 and KDBX 4.1's entry-level elements).
+    Lossy {
+        /// The database's format.
+        format: FormatVersion,
+    },
+    /// keepass cannot write this format.
+    Unsupported {
+        /// The database's format.
+        format: FormatVersion,
+    },
+}
+
+impl SaveSupport {
+    /// True when a save keeps everything: the only case a writer should
+    /// offer editing in.
+    pub fn is_lossless(self) -> bool {
+        matches!(self, SaveSupport::Lossless)
+    }
+}
+
 /// The KDBX `<Meta>` element.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]

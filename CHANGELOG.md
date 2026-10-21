@@ -4,7 +4,20 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows
 [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - unreleased
+## [0.1.1] - 2026-10-21
+
+### Added
+
+- `model::SaveSupport` (`Lossless`, `Lossy { format }`, `Unsupported { format }`)
+  and `save_support(&Database)` in both keepass adapters: whether that keepass
+  version can save a database without losing data. keepass 0.12 saves KDBX 4.0
+  losslessly and 4.1 lossily (it reads a 4.1 file's entry-level 4.1 data, the
+  previous parent, QualityCheck and custom icon name and time, without keeping
+  it); keepass 0.15 saves 4.1 only. Writers share this one rule, and it changes
+  with the adapter feature they build against. Tests check it against what
+  keepass's own save accepts.
+
+## [0.1.0] - 2026-10-19
 
 ### Added
 

@@ -49,15 +49,13 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
 MSRV is 1.89 (keepass 0.15 requires it): `cargo +1.89.0 test --all-features`.
 
-## Tests (as of 0.1.0)
+## Tests (as of 0.1.1)
 
-197 with `--all-features`: 152 unit (text incl. the exhaustive escape-table
-check, codec, fields, fingerprint incl. 6 `kdf` tests, model, visibility,
-path incl. property tests and the PathIndex bulk test, otp, serde contract), 8 + 8 capture
-integration tests (`tests/capture_keepass_0_12.rs`,
-`tests/capture_keepass_0_15.rs`, shared fixture in `tests/common/mod.rs`), 18
-corpus tests (`tests/corpus.rs`), 11 doc tests. `--no-default-features`: 146
-unit, 3 corpus tests (checksums, manifest, license), 11 doc tests.
+209 with `--all-features` (unit tests including the exhaustive escape-table
+check, property tests and the serde contract; 10 + 9 capture integration
+tests in `tests/capture_keepass_0_12.rs` and `tests/capture_keepass_0_15.rs`,
+including `save_support` checked against keepass's own save; the corpus tests;
+doc tests). `--no-default-features`: 169.
 
 Keep the library free of general-purpose tables (WASM size): escaping uses
 `text::ESCAPE_RANGES`, decoding uses the private `codec` module.
@@ -69,8 +67,10 @@ vaults with `cargo run --example gen_corpus` and update both checksums.
 
 ## Known keepass 0.12 limitations (pinned by tests)
 
-It cannot parse KDBX 4.1 group `<Tags>` or `<PreviousParentGroup>`, ignores
-`<QualityCheck>` and `<DeletionTime>`, splits `<Tags>` on `,` only (the adapter
+It cannot parse KDBX 4.1 group `<Tags>` or a group's `<PreviousParentGroup>`;
+it parses entry-level 4.1 data (an entry's previous parent, custom icon name
+and time) and drops it on save, which is why `save_support` reports 4.1 as
+`Lossy` for it; it ignores `<QualityCheck>` and `<DeletionTime>`, splits `<Tags>` on `,` only (the adapter
 re-splits), loses child document order (the adapter sorts by UUID), drops
 empty-valued fields, and cannot read the KDBX 3.1 empty-attachment fixture.
 

@@ -2,7 +2,7 @@
 //! `Database`.
 //!
 //! Each supported keepass version is an additive feature (`keepass-0_12`,
-//! `keepass-0_15`) with its own module exposing the same three functions:
+//! `keepass-0_15`) with its own module exposing the same four functions:
 //!
 //! - `capture(&Database, &Sealing) -> Snapshot`: a pure, infallible
 //!   transformation of an already-opened database. Every model field is
@@ -14,6 +14,9 @@
 //! - `otp_fields(&Entry) -> OtpFields`: the plaintext of an entry's
 //!   OTP-related fields only, so callers that capture under fingerprint sealing
 //!   can still compute TOTP codes (see [`crate::otp`]).
+//! - `save_support(&Database) -> SaveSupport`: whether this keepass version
+//!   can save the database without losing data, so every writer applies one
+//!   rule (see [`SaveSupport`](crate::model::SaveSupport)).
 //!
 //! Both modules are generated from one body; the handful of differences
 //! between keepass versions live in small per-version shims:
@@ -26,6 +29,7 @@
 //! | quality check | `Option<bool>` (absent means on) | `bool` |
 //! | auto-type obfuscation | `Option<bool>` | enum |
 //! | custom icon name and time | not supported: `None` | captured |
+//! | saves losslessly | KDBX 4.0 (4.1 loses entry-level 4.1 data) | KDBX 4.1 only |
 //!
 //! Gaps in both versions, because keepass keeps the data crate-private
 //! (candidates for upstream accessors):
@@ -85,7 +89,8 @@ macro_rules! keepass_adapter {
         use $crate::model::{
             Argon2Info, Argon2Variant, AutoType, AutoTypeAssociation, Compression, CustomValue,
             Entry, FormatVersion, Group, GroupFlags, HeaderInfo, Icon, InnerCipher, KdfInfo,
-            MemoryProtection, Meta, OuterCipher, Rgb, Sealing, Snapshot, Times, Timestamp,
+            MemoryProtection, Meta, OuterCipher, Rgb, SaveSupport, Sealing, Snapshot, Times,
+            Timestamp,
         };
         use $crate::otp::{OtpField, OtpFields};
 
@@ -117,6 +122,13 @@ macro_rules! keepass_adapter {
                     OtpField::from_kdbx_name(name).map(|f| (f, value.get().as_str()))
                 })
                 .collect()
+        }
+
+        /// Whether this keepass version can save `db` without losing data
+        /// (see [`SaveSupport`]). Decided by the file's format version alone:
+        /// what this keepass read of a newer format is already gone.
+        pub fn save_support(db: &::$kp::Database) -> SaveSupport {
+            save_support_for(format_version(&db.config.version))
         }
 
         fn format_version(version: &DatabaseVersion) -> FormatVersion {
@@ -422,6 +434,18 @@ pub mod keepass_0_12 {
         BTreeSet::new()
     }
 
+    /// keepass 0.12 writes KDBX 4 with the 4.0 element set: a 4.0 file
+    /// round-trips, and a 4.1 file loses its entry-level 4.1 data (previous
+    /// parent, QualityCheck, custom icon name and time), which it reads
+    /// without keeping. A later minor is unknown, so not claimed.
+    fn save_support_for(format: FormatVersion) -> SaveSupport {
+        match format {
+            FormatVersion::KDBX_4_0 => SaveSupport::Lossless,
+            FormatVersion::KDBX_4_1 => SaveSupport::Lossy { format },
+            _ => SaveSupport::Unsupported { format },
+        }
+    }
+
     fn group_previous_parent(_: &GroupRef<'_>) -> Option<Uuid> {
         None
     }
@@ -476,6 +500,15 @@ pub mod keepass_0_15 {
 
     fn group_tags(g: &GroupRef<'_>) -> BTreeSet<String> {
         tag_set(&g.tags)
+    }
+
+    /// keepass 0.15 writes KDBX 4.1 only: a 4.1 file round-trips, and it
+    /// refuses to save anything else (4.0 included, upstream #373).
+    fn save_support_for(format: FormatVersion) -> SaveSupport {
+        match format {
+            FormatVersion::KDBX_4_1 => SaveSupport::Lossless,
+            _ => SaveSupport::Unsupported { format },
+        }
     }
 
     fn group_previous_parent(g: &GroupRef<'_>) -> Option<Uuid> {

@@ -15,8 +15,8 @@ use kdbx_core::otp::OtpField;
 use keepass_0_12 as kp;
 
 /// The shared fixture as keepass 0.12 can read it: keepass 0.12 fails to
-/// parse a KDBX 4.1 file whose groups carry `<Tags>` or whose records carry
-/// `<PreviousParentGroup>`, so those are omitted.
+/// parse a KDBX 4.1 file whose groups carry `<Tags>` or `<PreviousParentGroup>`
+/// (entry-level 4.1 data it parses and drops), so those are omitted.
 fn fixture_bytes() -> (Vec<u8>, uuid::Uuid) {
     let (db15, icon) = rich_db_with(Kdbx41Extras::Omit);
     (save(&db15), icon)
@@ -193,4 +193,87 @@ fn both_keepass_versions_capture_the_same_file_alike() {
         as_read_by_keepass_0_12(kdbx_core::capture::keepass_0_15::capture(&db15, &sealing));
     let via_0_12 = capture(&open(&bytes), &sealing);
     assert_eq!(via_0_12, via_0_15);
+}
+
+/// Which formats keepass 0.12 saves, and how: 4.0 without loss; 4.1 with
+/// loss (it reads a 4.1 file's entry-level 4.1 data without keeping it, see
+/// the next test); anything else not at all. `Unsupported` must agree with
+/// keepass's own save refusing the format.
+#[test]
+fn save_support_matches_what_keepass_0_12_saves() {
+    use kdbx_core::capture::keepass_0_12::save_support;
+    use kdbx_core::model::{FormatVersion, SaveSupport};
+    use kp::config::DatabaseVersion;
+    let cases = [
+        (
+            DatabaseVersion::KDB3(1),
+            SaveSupport::Unsupported {
+                format: FormatVersion::KDBX_3_1,
+            },
+        ),
+        (DatabaseVersion::KDB4(0), SaveSupport::Lossless),
+        (
+            DatabaseVersion::KDB4(1),
+            SaveSupport::Lossy {
+                format: FormatVersion::KDBX_4_1,
+            },
+        ),
+        (
+            DatabaseVersion::KDB4(2),
+            SaveSupport::Unsupported {
+                format: FormatVersion::new(4, 2),
+            },
+        ),
+    ];
+    for (version, expected) in cases {
+        let mut db = kp::Database::new();
+        db.config.version = version.clone();
+        assert_eq!(save_support(&db), expected, "{version:?}");
+        let saved = db.save(
+            &mut Vec::new(),
+            kp::DatabaseKey::new().with_password(PASSWORD),
+        );
+        // One direction each way: a refused save is never reported savable,
+        // and a savable report is never refused. (An unknown later minor is
+        // reported unsupported even if keepass happens to write it.)
+        if saved.is_err() {
+            assert!(
+                matches!(expected, SaveSupport::Unsupported { .. }),
+                "{version:?}"
+            );
+        }
+        if !matches!(expected, SaveSupport::Unsupported { .. }) {
+            saved.unwrap_or_else(|e| panic!("{version:?}: {e}"));
+        }
+    }
+}
+
+/// Why 4.1 is `Lossy` for keepass 0.12: it parses a 4.1 file whose entries
+/// carry 4.1 data (a previous parent group, QualityCheck false) and saves it
+/// without that data. (Group-level 4.1 elements, group tags and a group's
+/// previous parent, it cannot parse at all.)
+#[test]
+fn keepass_0_12_drops_entry_level_kdbx41_data_on_save() {
+    let mut db15 = keepass_0_15::Database::new();
+    let a = db15.root_mut().add_group().id();
+    let b = db15.root_mut().add_group().id();
+    let e = db15.group_mut(a).unwrap().add_entry().id();
+    db15.entry_mut(e).unwrap().quality_check = false;
+    db15.entry_mut(e).unwrap().move_to(b).unwrap();
+    let key12 = || kp::DatabaseKey::new().with_password(PASSWORD);
+    let db12 = kp::Database::parse(&save(&db15), key12())
+        .expect("keepass 0.12 parses entry-level 4.1 data");
+    let mut resaved = Vec::new();
+    db12.save(&mut resaved, key12()).unwrap();
+    let back = keepass_0_15::Database::parse(
+        &resaved,
+        keepass_0_15::DatabaseKey::new().with_password(PASSWORD),
+    )
+    .unwrap();
+    let entry = back.entry(e).unwrap();
+    assert!(
+        entry.previous_parent().is_none(),
+        "previous parent survived"
+    );
+    assert!(entry.quality_check, "QualityCheck false survived");
 }

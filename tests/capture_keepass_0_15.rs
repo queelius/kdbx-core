@@ -125,3 +125,42 @@ fn format_version_is_reported() {
     assert_eq!(snap.format.to_string(), "4.1");
     assert!(snap.root.entries.is_empty() && snap.root.groups.is_empty());
 }
+
+/// Which formats keepass 0.15 saves: 4.1 without loss, 4.0 not at all (until
+/// upstream #373), nothing else. `Unsupported` must agree with keepass's own
+/// save refusing the format.
+#[test]
+fn save_support_matches_what_keepass_0_15_saves() {
+    use kdbx_core::capture::keepass_0_15::save_support;
+    use kdbx_core::model::{FormatVersion, SaveSupport};
+    use kp::config::DatabaseVersion;
+    let cases = [
+        (
+            DatabaseVersion::KDB3(1),
+            SaveSupport::Unsupported {
+                format: FormatVersion::KDBX_3_1,
+            },
+        ),
+        (
+            DatabaseVersion::KDB4(0),
+            SaveSupport::Unsupported {
+                format: FormatVersion::KDBX_4_0,
+            },
+        ),
+        (DatabaseVersion::KDB4(1), SaveSupport::Lossless),
+    ];
+    for (version, expected) in cases {
+        let mut db = kp::Database::new();
+        db.config.version = version.clone();
+        assert_eq!(save_support(&db), expected, "{version:?}");
+        let saved = db.save(
+            &mut Vec::new(),
+            kp::DatabaseKey::new().with_password(PASSWORD),
+        );
+        assert_eq!(
+            saved.is_err(),
+            matches!(expected, SaveSupport::Unsupported { .. }),
+            "{version:?}"
+        );
+    }
+}
