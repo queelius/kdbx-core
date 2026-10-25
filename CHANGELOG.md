@@ -4,6 +4,30 @@ All notable changes to this crate are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crate follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-10-24
+
+### Changed (breaking)
+
+- `SaveSupport::Lossy` now carries `losses: BTreeSet<SaveLoss>`, what saving
+  that vault would lose, and `SaveSupport` is no longer `Copy`
+  (`is_lossless` takes `&self`). keepass 0.12's verdicts were wrong in 0.1.1:
+  it reported KDBX 4.0 as lossless, but saving any vault drops empty-valued
+  fields, saving one with deletion records loses them (KeePassXC then sees
+  none, so a merge can bring deleted entries back), and saving one whose
+  groups hold two subgroups or two entries loses their order. All measured
+  against KeePassXC 2.7.9; keepass 0.15 keeps all three.
+
+### Added
+
+- `model::SaveLoss` (`DeletionRecords`, `ChildOrder`, `EmptyFields`,
+  `Kdbx41EntryData`) with `ALL`, `is_cosmetic` and `description`.
+- `SaveSupport::allows_save` (the ecosystem's save rule: every loss
+  cosmetic), `losses()` and `with_losses`. `SaveSupport` and `SaveLoss` now
+  serialize (pinned in the serde contract).
+- Corpus vault `keepassxc_v40_save_losses.kdbx` (written by KeePassXC), and
+  corpus tests that save every savable vault with each keepass version and
+  check the read-back loses only what `save_support` reported.
+
 ## [0.1.1] - 2026-10-21
 
 ### Added

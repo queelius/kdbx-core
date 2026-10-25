@@ -206,7 +206,7 @@ macro_rules! adapter_tests {
             use super::*;
             use kdbx_core::capture::$kp::{capture, otp_fields};
 
-            pub(super) fn open(f: &CorpusFile) -> Result<::$kp::Database, String> {
+            pub(super) fn db_key(f: &CorpusFile) -> Result<::$kp::DatabaseKey, String> {
                 let mut key = ::$kp::DatabaseKey::new();
                 if let Some(pw) = &f.password {
                     key = key.with_password(pw);
@@ -216,7 +216,24 @@ macro_rules! adapter_tests {
                         .with_keyfile(&mut read(kf).as_slice())
                         .map_err(|e| e.to_string())?;
                 }
-                ::$kp::Database::parse(&read(&f.file), key).map_err(|e| e.to_string())
+                Ok(key)
+            }
+
+            pub(super) fn open(f: &CorpusFile) -> Result<::$kp::Database, String> {
+                parse(f, &read(&f.file))
+            }
+
+            pub(super) fn parse(f: &CorpusFile, bytes: &[u8]) -> Result<::$kp::Database, String> {
+                ::$kp::Database::parse(bytes, db_key(f)?).map_err(|e| e.to_string())
+            }
+
+            /// `db` saved by this keepass with `f`'s key (for `saving`).
+            #[cfg(feature = "keepass-0_15")]
+            pub(super) fn save(f: &CorpusFile, db: &::$kp::Database) -> Vec<u8> {
+                let mut out = Vec::new();
+                db.save(&mut out, db_key(f).unwrap())
+                    .unwrap_or_else(|e| panic!("{}: {e}", f.file));
+                out
             }
 
             pub(super) fn snapshots(f: &CorpusFile) -> (Snapshot, Snapshot) {
@@ -385,6 +402,159 @@ adapter_tests!(
     Reader::Keepass015,
     "kdbx-core_corpus_v41.kdbx"
 );
+
+/// What saving loses, measured: each vault a keepass version saves is saved,
+/// the original and the saved file are both captured through keepass 0.15
+/// (which reads deletion times, document order and empty fields), and once
+/// the losses `save_support` reported are forgotten the two must be equal.
+/// So a loss `save_support` does not report fails here. (keepass 0.15 is
+/// also the reader when checking itself, so a loss in its own reading would
+/// go unseen; KeePassXC confirmed the 0.12 losses when the corpus vault
+/// `keepassxc_v40_save_losses.kdbx` was built.)
+#[cfg(feature = "keepass-0_15")]
+mod saving {
+    use super::*;
+    use kdbx_core::capture::keepass_0_15::capture;
+    use kdbx_core::model::{Group, SaveLoss, SaveSupport};
+    use std::collections::BTreeSet;
+
+    /// `bytes` (a file with `f`'s key) as keepass 0.15 reads it, revealed so
+    /// empty secret values can be told apart.
+    fn read_back(f: &CorpusFile, bytes: &[u8]) -> Snapshot {
+        let db = via_keepass_0_15::parse(f, bytes).unwrap_or_else(|e| panic!("{}: {e}", f.file));
+        capture(&db, &Sealing::Reveal(&key()))
+    }
+
+    /// `snap` without what `losses` says a save drops.
+    fn forget(mut snap: Snapshot, losses: &BTreeSet<SaveLoss>) -> Snapshot {
+        fn entry(e: &mut kdbx_core::model::Entry, losses: &BTreeSet<SaveLoss>) {
+            if losses.contains(&SaveLoss::EmptyFields) {
+                e.fields.retain(|_, f| f.value.as_plain() != Some(""));
+            }
+            if losses.contains(&SaveLoss::Kdbx41EntryData) {
+                e.previous_parent = None;
+                e.quality_check = true;
+            }
+            for h in &mut e.history {
+                entry(h, losses);
+            }
+        }
+        fn group(g: &mut Group, losses: &BTreeSet<SaveLoss>) {
+            if losses.contains(&SaveLoss::ChildOrder) {
+                g.groups.sort_by_key(|c| c.uuid);
+                g.entries.sort_by_key(|e| e.uuid);
+            }
+            g.entries.iter_mut().for_each(|e| entry(e, losses));
+            g.groups.iter_mut().for_each(|c| group(c, losses));
+        }
+        if losses.contains(&SaveLoss::DeletionRecords) {
+            snap.deleted_objects.clear();
+        }
+        if losses.contains(&SaveLoss::Kdbx41EntryData) {
+            for icon in snap.meta.custom_icons.values_mut() {
+                icon.name = None;
+                icon.modified = None;
+            }
+        }
+        group(&mut snap.root, losses);
+        snap
+    }
+
+    /// Saves `f` with one keepass version and checks the result against the
+    /// report; returns the report and the two read-back snapshots.
+    fn round_trip(
+        f: &CorpusFile,
+        support: SaveSupport,
+        saved: Vec<u8>,
+    ) -> (SaveSupport, Snapshot, Snapshot) {
+        let before = read_back(f, &read(&f.file));
+        let after = read_back(f, &saved);
+        let losses: BTreeSet<_> = support.losses().collect();
+        assert_eq!(
+            forget(before.clone(), &losses),
+            forget(after.clone(), &losses),
+            "{}: saving lost more than {support:?}",
+            f.file
+        );
+        (support, before, after)
+    }
+
+    fn savable<'a>(
+        reader: Reader,
+        report: impl Fn(&CorpusFile) -> SaveSupport + 'a,
+    ) -> impl Iterator<Item = (CorpusFile, SaveSupport)> + 'a {
+        vaults()
+            .filter(move |f| f.readers.contains(&reader) && f.readers.contains(&Reader::Keepass015))
+            .map(move |f| {
+                let support = report(&f);
+                (f, support)
+            })
+            .filter(|(_, support)| !matches!(support, SaveSupport::Unsupported { .. }))
+    }
+
+    #[cfg(feature = "keepass-0_12")]
+    #[test]
+    fn keepass_0_12_loses_only_what_save_support_reports() {
+        use kdbx_core::capture::keepass_0_12::save_support;
+        let mut checked = 0;
+        for (f, support) in savable(Reader::Keepass012, |f| {
+            save_support(&via_keepass_0_12::open(f).unwrap())
+        }) {
+            let db = via_keepass_0_12::open(&f).unwrap();
+            round_trip(&f, support, via_keepass_0_12::save(&f, &db));
+            checked += 1;
+        }
+        assert!(checked >= 7, "only {checked} vaults saved");
+    }
+
+    #[cfg(feature = "keepass-0_12")]
+    #[test]
+    fn keepass_0_12_losses_on_the_keepassxc_vault_are_real() {
+        use kdbx_core::capture::keepass_0_12::save_support;
+        let f = by_name("keepassxc_v40_save_losses.kdbx");
+        let db = via_keepass_0_12::open(&f).unwrap();
+        let (support, before, after) =
+            round_trip(&f, save_support(&db), via_keepass_0_12::save(&f, &db));
+        assert_eq!(
+            support.losses().collect::<BTreeSet<_>>(),
+            [
+                SaveLoss::DeletionRecords,
+                SaveLoss::ChildOrder,
+                SaveLoss::EmptyFields
+            ]
+            .into()
+        );
+        assert!(!support.allows_save(), "deletion records are not cosmetic");
+        // Each deterministic loss happened. (Child order is a hash set's, so
+        // it can come back unchanged by chance.)
+        assert_eq!(before.deleted_objects.len(), 1);
+        assert!(before.deleted_objects.values().all(Option::is_some));
+        assert!(after.deleted_objects.values().all(Option::is_none));
+        let placeholder = |s: &Snapshot| {
+            s.entries().any(|e| {
+                e.fields
+                    .get("Placeholder")
+                    .is_some_and(|v| v.value.as_plain() == Some(""))
+            })
+        };
+        assert!(placeholder(&before) && !placeholder(&after));
+    }
+
+    #[test]
+    fn keepass_0_15_saves_kdbx41_without_loss() {
+        use kdbx_core::capture::keepass_0_15::save_support;
+        let mut checked = 0;
+        for (f, support) in savable(Reader::Keepass015, |f| {
+            save_support(&via_keepass_0_15::open(f).unwrap())
+        }) {
+            assert!(support.is_lossless(), "{}: {support:?}", f.file);
+            let db = via_keepass_0_15::open(&f).unwrap();
+            round_trip(&f, support, via_keepass_0_15::save(&f, &db));
+            checked += 1;
+        }
+        assert!(checked >= 2, "only {checked} vaults saved");
+    }
+}
 
 fn generated_facts(snap: &Snapshot) {
     use kdbx_core::path::{VaultPath, path_of};

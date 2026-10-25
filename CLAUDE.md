@@ -49,13 +49,14 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
 MSRV is 1.89 (keepass 0.15 requires it): `cargo +1.89.0 test --all-features`.
 
-## Tests (as of 0.1.1)
+## Tests (as of 0.2.0)
 
-209 with `--all-features` (unit tests including the exhaustive escape-table
+214 with `--all-features` (unit tests including the exhaustive escape-table
 check, property tests and the serde contract; 10 + 9 capture integration
 tests in `tests/capture_keepass_0_12.rs` and `tests/capture_keepass_0_15.rs`,
-including `save_support` checked against keepass's own save; the corpus tests;
-doc tests). `--no-default-features`: 169.
+including `save_support` checked against keepass's own save; the corpus
+tests, including saving every savable vault and checking the read-back
+against `save_support`; doc tests). `--no-default-features`: 171.
 
 Keep the library free of general-purpose tables (WASM size): escaping uses
 `text::ESCAPE_RANGES`, decoding uses the private `codec` module.
@@ -69,10 +70,12 @@ vaults with `cargo run --example gen_corpus` and update both checksums.
 
 It cannot parse KDBX 4.1 group `<Tags>` or a group's `<PreviousParentGroup>`;
 it parses entry-level 4.1 data (an entry's previous parent, custom icon name
-and time) and drops it on save, which is why `save_support` reports 4.1 as
-`Lossy` for it; it ignores `<QualityCheck>` and `<DeletionTime>`, splits `<Tags>` on `,` only (the adapter
-re-splits), loses child document order (the adapter sorts by UUID), drops
-empty-valued fields, and cannot read the KDBX 3.1 empty-attachment fixture.
+and time) and drops it on save; it ignores `<QualityCheck>` and
+`<DeletionTime>` (so KeePassXC drops the deletion records it saves), splits
+`<Tags>` on `,` only (the adapter re-splits), loses child document order (the
+adapter sorts by UUID), drops empty-valued fields, and cannot read the KDBX
+3.1 empty-attachment fixture. `save_support` reports each loss on save as a
+`SaveLoss`, and `tests/corpus.rs` checks the report against an actual save.
 
 ## Conventions
 

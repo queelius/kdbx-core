@@ -204,6 +204,28 @@
       ]
     },
     {
+      "file": "keepassxc_v40_save_losses.kdbx",
+      "kind": "vault",
+      "kdbx_version": {
+        "major": 4,
+        "minor": 0
+      },
+      "password": "demopass",
+      "keyfile": null,
+      "origin": "Written by KeePassXC 2.7.9 (keepassxc-cli) from keepass-rs_test_db_kdbx4_with_password_argon2.kdbx: added group Work with entries zeta, alpha, mid and doomed, deleted doomed and emptied the recycle bin, then merged in an entry whose Placeholder field is empty (from a KeePassXC XML import). Built 2026-10-24 to measure what keepass 0.12 loses on save.",
+      "license": "MIT, Copyright (c) 2019 Stefan Seemayer (keepass-rs); full text in LICENSE-keepass-rs (derived from a keepass-rs test file)",
+      "exercises": [
+        "a deletion record (DeletedObject with a DeletionTime)",
+        "a group whose entries are not in UUID order",
+        "an empty custom field"
+      ],
+      "sha256": "2a046ca74fe6d933dfdf484d4e17e3827071063ad71fae2a83d69bc0bca265cb",
+      "readers": [
+        "keepass-0_12",
+        "keepass-0_15"
+      ]
+    },
+    {
       "file": "LICENSE-keepass-rs",
       "kind": "license",
       "kdbx_version": null,

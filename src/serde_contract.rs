@@ -178,6 +178,41 @@ fn unit_enums() {
 }
 
 #[test]
+fn save_support() {
+    for loss in SaveLoss::ALL {
+        let name = match loss {
+            SaveLoss::DeletionRecords => "deletion_records",
+            SaveLoss::ChildOrder => "child_order",
+            SaveLoss::EmptyFields => "empty_fields",
+            SaveLoss::Kdbx41EntryData => "kdbx41_entry_data",
+        };
+        pinned(loss, &format!("\"{name}\""));
+    }
+    let lossy = SaveSupport::with_losses(
+        FormatVersion::KDBX_4_0,
+        [SaveLoss::EmptyFields, SaveLoss::ChildOrder].into(),
+    );
+    for support in [
+        SaveSupport::Lossless,
+        lossy,
+        SaveSupport::Unsupported {
+            format: FormatVersion::KDBX_3_1,
+        },
+    ] {
+        let expected = match support {
+            SaveSupport::Lossless => r#"{"kind":"lossless"}"#,
+            SaveSupport::Lossy { .. } => {
+                r#"{"kind":"lossy","format":{"major":4,"minor":0},"losses":["child_order","empty_fields"]}"#
+            }
+            SaveSupport::Unsupported { .. } => {
+                r#"{"kind":"unsupported","format":{"major":3,"minor":1}}"#
+            }
+        };
+        pinned(support, expected);
+    }
+}
+
+#[test]
 fn kdf_info() {
     let argon2 = Argon2Info::new(Argon2Variant::Argon2id, 67_108_864, 10, 2, 0x13);
     for kdf in [

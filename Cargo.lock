@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "kdbx-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "chrono",

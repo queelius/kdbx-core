@@ -1,6 +1,6 @@
 [package]
 name = "kdbx-core"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 # keepass 0.15 (the `keepass-0_15` adapter) requires 1.89.
 rust-version = "1.89"

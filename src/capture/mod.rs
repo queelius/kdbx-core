@@ -15,8 +15,8 @@
 //!   OTP-related fields only, so callers that capture under fingerprint sealing
 //!   can still compute TOTP codes (see [`crate::otp`]).
 //! - `save_support(&Database) -> SaveSupport`: whether this keepass version
-//!   can save the database without losing data, so every writer applies one
-//!   rule (see [`SaveSupport`](crate::model::SaveSupport)).
+//!   can save the database and what the save would lose, so every writer
+//!   applies one rule (see [`SaveSupport`](crate::model::SaveSupport)).
 //!
 //! Both modules are generated from one body; the handful of differences
 //! between keepass versions live in small per-version shims:
@@ -29,7 +29,7 @@
 //! | quality check | `Option<bool>` (absent means on) | `bool` |
 //! | auto-type obfuscation | `Option<bool>` | enum |
 //! | custom icon name and time | not supported: `None` | captured |
-//! | saves losslessly | KDBX 4.0 (4.1 loses entry-level 4.1 data) | KDBX 4.1 only |
+//! | saves | KDBX 4.0 and 4.1, with losses (`SaveLoss`) | KDBX 4.1 only, losslessly |
 //!
 //! Gaps in both versions, because keepass keeps the data crate-private
 //! (candidates for upstream accessors):
@@ -124,11 +124,12 @@ macro_rules! keepass_adapter {
                 .collect()
         }
 
-        /// Whether this keepass version can save `db` without losing data
-        /// (see [`SaveSupport`]). Decided by the file's format version alone:
-        /// what this keepass read of a newer format is already gone.
+        /// Whether this keepass version can save `db`, and what the save
+        /// would lose (see [`SaveSupport`]). Some losses are decided by
+        /// what `db` holds, others by the format alone: what this keepass
+        /// did not read is already gone and cannot be looked for.
         pub fn save_support(db: &::$kp::Database) -> SaveSupport {
-            save_support_for(format_version(&db.config.version))
+            save_support_for(db)
         }
 
         fn format_version(version: &DatabaseVersion) -> FormatVersion {
@@ -434,16 +435,38 @@ pub mod keepass_0_12 {
         BTreeSet::new()
     }
 
-    /// keepass 0.12 writes KDBX 4 with the 4.0 element set: a 4.0 file
-    /// round-trips, and a 4.1 file loses its entry-level 4.1 data (previous
-    /// parent, QualityCheck, custom icon name and time), which it reads
-    /// without keeping. A later minor is unknown, so not claimed.
-    fn save_support_for(format: FormatVersion) -> SaveSupport {
-        match format {
-            FormatVersion::KDBX_4_0 => SaveSupport::Lossless,
-            FormatVersion::KDBX_4_1 => SaveSupport::Lossy { format },
-            _ => SaveSupport::Unsupported { format },
+    /// keepass 0.12 writes KDBX 4 with the 4.0 element set, and no vault
+    /// round-trips whole (measured against KeePassXC, `tests/corpus.rs`): it
+    /// reads deletion records without their time, keeps a group's children
+    /// in hash sets, drops empty fields while reading, and reads a 4.1
+    /// file's entry-level 4.1 data without keeping it. A later minor is
+    /// unknown, so not claimed.
+    fn save_support_for(db: &::keepass_0_12::Database) -> SaveSupport {
+        use crate::model::SaveLoss;
+        let format = format_version(&db.config.version);
+        if format != FormatVersion::KDBX_4_0 && format != FormatVersion::KDBX_4_1 {
+            return SaveSupport::Unsupported { format };
         }
+        let mut losses = BTreeSet::from([SaveLoss::EmptyFields]);
+        if !db.deleted_objects.is_empty() {
+            losses.insert(SaveLoss::DeletionRecords);
+        }
+        if has_sibling_children(&db.root()) {
+            losses.insert(SaveLoss::ChildOrder);
+        }
+        if format == FormatVersion::KDBX_4_1 {
+            losses.insert(SaveLoss::Kdbx41EntryData);
+        }
+        SaveSupport::with_losses(format, losses)
+    }
+
+    /// Whether some group in `g`'s tree has two subgroups or two entries,
+    /// whose order a hash set loses. (Subgroups and entries are written
+    /// apart, so one of each has no order to lose.)
+    fn has_sibling_children(g: &GroupRef<'_>) -> bool {
+        g.groups().count() > 1
+            || g.entries().count() > 1
+            || g.groups().any(|c| has_sibling_children(&c))
     }
 
     fn group_previous_parent(_: &GroupRef<'_>) -> Option<Uuid> {
@@ -502,12 +525,13 @@ pub mod keepass_0_15 {
         tag_set(&g.tags)
     }
 
-    /// keepass 0.15 writes KDBX 4.1 only: a 4.1 file round-trips, and it
-    /// refuses to save anything else (4.0 included, upstream #373).
-    fn save_support_for(format: FormatVersion) -> SaveSupport {
-        match format {
+    /// keepass 0.15 writes KDBX 4.1 only: a 4.1 file round-trips
+    /// (`tests/corpus.rs`), and it refuses to save anything else (4.0
+    /// included, upstream #373).
+    fn save_support_for(db: &::keepass_0_15::Database) -> SaveSupport {
+        match format_version(&db.config.version) {
             FormatVersion::KDBX_4_1 => SaveSupport::Lossless,
-            _ => SaveSupport::Unsupported { format },
+            format => SaveSupport::Unsupported { format },
         }
     }
 

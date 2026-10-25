@@ -195,14 +195,16 @@ fn both_keepass_versions_capture_the_same_file_alike() {
     assert_eq!(via_0_12, via_0_15);
 }
 
-/// Which formats keepass 0.12 saves, and how: 4.0 without loss; 4.1 with
-/// loss (it reads a 4.1 file's entry-level 4.1 data without keeping it, see
-/// the next test); anything else not at all. `Unsupported` must agree with
-/// keepass's own save refusing the format.
+/// Which formats keepass 0.12 saves, and what an empty vault loses: 4.0
+/// and 4.1 with loss (empty fields always, since it drops them while
+/// reading; 4.1 also its entry-level 4.1 data, see the next test); anything
+/// else not at all. `Unsupported` must agree with keepass's own save
+/// refusing the format. What a populated vault loses is measured in
+/// `tests/corpus.rs`.
 #[test]
 fn save_support_matches_what_keepass_0_12_saves() {
     use kdbx_core::capture::keepass_0_12::save_support;
-    use kdbx_core::model::{FormatVersion, SaveSupport};
+    use kdbx_core::model::{FormatVersion, SaveLoss, SaveSupport};
     use kp::config::DatabaseVersion;
     let cases = [
         (
@@ -211,12 +213,16 @@ fn save_support_matches_what_keepass_0_12_saves() {
                 format: FormatVersion::KDBX_3_1,
             },
         ),
-        (DatabaseVersion::KDB4(0), SaveSupport::Lossless),
+        (
+            DatabaseVersion::KDB4(0),
+            SaveSupport::with_losses(FormatVersion::KDBX_4_0, [SaveLoss::EmptyFields].into()),
+        ),
         (
             DatabaseVersion::KDB4(1),
-            SaveSupport::Lossy {
-                format: FormatVersion::KDBX_4_1,
-            },
+            SaveSupport::with_losses(
+                FormatVersion::KDBX_4_1,
+                [SaveLoss::EmptyFields, SaveLoss::Kdbx41EntryData].into(),
+            ),
         ),
         (
             DatabaseVersion::KDB4(2),

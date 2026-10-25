@@ -223,21 +223,27 @@ pub struct FormatVersion {
     pub minor: u16,
 }
 
-/// Whether a keepass version can save a database of some format, and whether
-/// the save keeps everything the file held. Each keepass adapter reports it
-/// for an opened database (`capture::keepass_0_12::save_support`,
+/// Whether a keepass version can save an opened database, and what the save
+/// would lose. Each keepass adapter reports it for one database
+/// (`capture::keepass_0_12::save_support`,
 /// `capture::keepass_0_15::save_support`), so writers share one rule and it
 /// changes with the adapter feature they build against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// The ecosystem's save rule is [`SaveSupport::allows_save`]: save when
+/// nothing is lost, or when every loss is cosmetic and the writer says which.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SaveSupport {
     /// Saving keeps everything the file holds.
     Lossless,
-    /// keepass writes this format, but may drop data the format holds that
-    /// it does not read (keepass 0.12 and KDBX 4.1's entry-level elements).
+    /// keepass writes this format, but saving this database loses `losses`
+    /// (never empty).
     Lossy {
         /// The database's format.
         format: FormatVersion,
+        /// What the save would lose.
+        losses: BTreeSet<SaveLoss>,
     },
     /// keepass cannot write this format.
     Unsupported {
@@ -247,10 +253,96 @@ pub enum SaveSupport {
 }
 
 impl SaveSupport {
-    /// True when a save keeps everything: the only case a writer should
-    /// offer editing in.
-    pub fn is_lossless(self) -> bool {
+    /// A `Lossy` report, or `Lossless` when `losses` is empty.
+    pub fn with_losses(format: FormatVersion, losses: BTreeSet<SaveLoss>) -> Self {
+        if losses.is_empty() {
+            SaveSupport::Lossless
+        } else {
+            SaveSupport::Lossy { format, losses }
+        }
+    }
+
+    /// True when a save keeps everything.
+    pub fn is_lossless(&self) -> bool {
         matches!(self, SaveSupport::Lossless)
+    }
+
+    /// What a save would lose: empty when lossless or unsupported.
+    pub fn losses(&self) -> impl Iterator<Item = SaveLoss> + '_ {
+        let losses = match self {
+            SaveSupport::Lossy { losses, .. } => Some(losses),
+            SaveSupport::Lossless | SaveSupport::Unsupported { .. } => None,
+        };
+        losses.into_iter().flatten().copied()
+    }
+
+    /// Whether a writer may save: keepass writes the format and every loss
+    /// is cosmetic ([`SaveLoss::is_cosmetic`]). A writer that saves with
+    /// losses must tell the user which ([`SaveLoss::description`]).
+    pub fn allows_save(&self) -> bool {
+        match self {
+            SaveSupport::Lossless => true,
+            SaveSupport::Lossy { losses, .. } => losses.iter().all(|l| l.is_cosmetic()),
+            SaveSupport::Unsupported { .. } => false,
+        }
+    }
+}
+
+/// One kind of data a keepass version drops when it saves (see
+/// [`SaveSupport::Lossy`]). Each was measured against KeePassXC: a vault it
+/// wrote, opened and saved by keepass, then read back by KeePassXC and by
+/// keepass 0.15.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SaveLoss {
+    /// The `<DeletedObjects>` records. keepass 0.12 reads them without their
+    /// time, and KeePassXC discards a record without one, so after a merge
+    /// or sync an entry or group deleted here can come back from another copy.
+    DeletionRecords,
+    /// The order of subgroups and of entries within a group, which KeePassXC
+    /// shows as the user arranged it.
+    ChildOrder,
+    /// Fields whose value is empty. keepass 0.12 drops them while reading,
+    /// so whether an opened vault had any cannot be known: it is reported for
+    /// every vault keepass 0.12 opens.
+    EmptyFields,
+    /// KDBX 4.1 entry data: an entry's previous parent group, a
+    /// QualityCheck of false, and custom icon names and times.
+    Kdbx41EntryData,
+}
+
+impl SaveLoss {
+    /// Every kind, in order.
+    pub const ALL: [SaveLoss; 4] = [
+        SaveLoss::DeletionRecords,
+        SaveLoss::ChildOrder,
+        SaveLoss::EmptyFields,
+        SaveLoss::Kdbx41EntryData,
+    ];
+
+    /// True when the loss changes only how the vault is arranged or which
+    /// empty fields it lists: no non-empty value is lost, and nothing another
+    /// tool acts on (a merge acts on deletion records).
+    pub fn is_cosmetic(self) -> bool {
+        match self {
+            SaveLoss::ChildOrder | SaveLoss::EmptyFields => true,
+            SaveLoss::DeletionRecords | SaveLoss::Kdbx41EntryData => false,
+        }
+    }
+
+    /// What is lost, as a phrase for the user ("saving loses ...").
+    pub fn description(self) -> &'static str {
+        match self {
+            SaveLoss::DeletionRecords => {
+                "the record of deleted entries and groups that KeePassXC uses when merging"
+            }
+            SaveLoss::ChildOrder => "the order of groups and entries within each group",
+            SaveLoss::EmptyFields => "fields with empty values",
+            SaveLoss::Kdbx41EntryData => {
+                "KDBX 4.1 entry data (previous group, password quality exclusion, custom icon names)"
+            }
+        }
     }
 }
 
@@ -1627,5 +1719,36 @@ mod tests {
         }
         assert_eq!(FormatVersion::KDBX_4_0.to_string(), "4.0");
         assert!(FormatVersion::KDBX_3_1 < FormatVersion::KDBX_4_0);
+    }
+
+    #[test]
+    fn save_is_allowed_only_when_every_loss_is_cosmetic() {
+        let v40 = FormatVersion::KDBX_4_0;
+        assert_eq!(
+            SaveSupport::with_losses(v40, BTreeSet::new()),
+            SaveSupport::Lossless
+        );
+        assert!(SaveSupport::Lossless.allows_save());
+        assert!(!SaveSupport::Unsupported { format: v40 }.allows_save());
+        let cosmetic: BTreeSet<_> = SaveLoss::ALL
+            .into_iter()
+            .filter(|l| l.is_cosmetic())
+            .collect();
+        assert_eq!(
+            cosmetic,
+            [SaveLoss::ChildOrder, SaveLoss::EmptyFields].into()
+        );
+        let lossy = SaveSupport::with_losses(v40, cosmetic.clone());
+        assert!(lossy.allows_save() && !lossy.is_lossless());
+        assert_eq!(lossy.losses().collect::<BTreeSet<_>>(), cosmetic);
+        for loss in SaveLoss::ALL.into_iter().filter(|l| !l.is_cosmetic()) {
+            let mut losses = cosmetic.clone();
+            losses.insert(loss);
+            assert!(
+                !SaveSupport::with_losses(v40, losses).allows_save(),
+                "{loss:?}"
+            );
+        }
+        assert_eq!(SaveSupport::Lossless.losses().count(), 0);
     }
 }
